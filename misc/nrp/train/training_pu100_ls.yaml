@@ -12,51 +12,48 @@ data:
     train_subset: null
     val_subset: null
 
+    debug: true
+
     model: transformer
 
-    hidden_dim: 128
-    num_layers: 4        
-    nhead: 16        
-    latent_dim: 4     
+    hidden_dim: 256
+    num_layers: 4    
+    nhead: 4
+    latent_dim: 128
     dropout: 0.1
 
     learning_rate: 0.0001  
     weight_decay: 0.0001   
     epochs: 100
-    batch_size: 4
     num_workers: 4
 
     scheduler_gamma: 0.5
-    scheduler_milestones: [50, 75, 100]
+    scheduler_milestones: [100, 200]
 
     early_stopping_patience: 15
 
     gradient_clip_val: 1.0
     gradient_clip_algorithm: norm
-    accumulate_grad_batches: 8
+    accumulate_grad_batches: 4
     check_val_every_n_epoch: 5
     precision: 16
 
     oc_q_min: 0.1
-    oc_s_B: 5.0
-    oc_repulsive_chunk_size: 4
-    oc_use_checkpointing: false
+    oc_s_B: 1.0
+    oc_repulsive_chunk_size: 32
 
     loss_weight_attractive: 1.0
     loss_weight_repulsive: 1.0
     loss_weight_beta: 1.0
-    loss_weight_chi2: 0.5
 
     output_dir: /data/output/pu100_ls/
-    save_every: 5
+    save_every: 10
+    log_every_n_steps: 10
     resume: null
 
     seed: 42
     num_cpu_threads: 64
-    gpus: 1
-
-    dbscan_eps: 0.05
-    dbscan_min_samples: 2
+    gpus: [0]
 
     purity_threshold: 0.75
     eta_cut: null
@@ -70,12 +67,13 @@ data:
 
     epsilon_validation_values: [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.15, 0.2, 0.5, 1.0]
 ---
-apiVersion: apps/v1
+apiVersion: batch/v1
 kind: Job
 metadata:
   name: ml-tracking-pu100-ls
   namespace: cern-cms-gpu-tracking
 spec:
+  backoffLimit: 0
   template:
     metadata:
       labels:
@@ -84,16 +82,18 @@ spec:
       containers:
       - name: ml-tracking-pu100-ls-container
         image: aaarora/ml-tracking:latest
-        args: ["python3", "src/main.py", "--config", "/home/config.yaml"]
+        imagePullPolicy: IfNotPresent
+        # args: ["python3", "src/main.py", "--config", "/home/config.yaml"]
+        args: ["sleep", "infinity"]
         resources:
           limits:
             memory: 32Gi
             cpu: 12
-            nvidia.com/rtxa6000: 1
+            nvidia.com/a40: 1
           requests:
             memory: 16Gi
             cpu: 8  
-            nvidia.com/rtxa6000: 1
+            nvidia.com/a40: 1
         volumeMounts:
         - mountPath: /data
           name: ml-tracking-pu100-ls-pvc

@@ -2,13 +2,13 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: ml-tracking-pu100-t3-config
+  name: ml-tracking-pu200-t3-config
   namespace: cern-cms-gpu-tracking
 data:
   config.yaml: |
-    train_data_dir: /data/pu100_t3/train
-    val_data_dir: /data/pu100_t3/val
-    
+    train_data_dir: /data/pu200_t3/train
+    val_data_dir: /data/pu200_t3/val
+
     train_subset: null
     val_subset: null
 
@@ -48,7 +48,7 @@ data:
     loss_weight_repulsive: 1.0
     loss_weight_beta: 1.0
 
-    output_dir: /data/output/pu100_t3/
+    output_dir: /data/output/pu200_t3/
     save_every: 5
     resume: null
 
@@ -74,46 +74,46 @@ data:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: ml-tracking-pu100-t3
+  name: ml-tracking-pu200-t3
   namespace: cern-cms-gpu-tracking
 spec:
-  backoffLimit: 0
   template:
     metadata:
       labels:
-        app: ml-tracking-pu100-t3
+        app: ml-tracking-pu200-t3
     spec:
       containers:
-      - name: ml-tracking-pu100-t3-container
+      - name: ml-tracking-pu200-t3-container
         image: aaarora/ml-tracking:latest
-        args: ["python3", "src/main.py", "--config", "/home/config.yaml"]
+        # args: ["python3", "src/main.py", "--config", "/home/config.yaml"]
+        args: ["sleep", "infinity"]
         resources:
           limits:
             memory: 32Gi
             cpu: 12
-            nvidia.com/a40: 1
+            nvidia.com/a100: 1
           requests:
             memory: 16Gi
             cpu: 8  
-            nvidia.com/a40: 1
+            nvidia.com/a100: 1
         volumeMounts:
         - mountPath: /data
-          name: ml-tracking-pu100-t3-pvc
+          name: ml-tracking-pu200-t3-pvc
         - mountPath: /dev/shm
           name: dshm
         - mountPath: /home/config.yaml
           subPath: config.yaml
-          name: ml-tracking-pu100-t3-config-volume
+          name: ml-tracking-pu200-t3-config-volume
       volumes:
-        - name: ml-tracking-pu100-t3-pvc
+        - name: ml-tracking-pu200-t3-pvc
           persistentVolumeClaim:
             claimName: ml-tracking-pvc
         - name: dshm
           emptyDir:
             medium: Memory
             sizeLimit: 2Gi
-        - name: ml-tracking-pu100-t3-config-volume
+        - name: ml-tracking-pu200-t3-config-volume
           configMap:
-            name: ml-tracking-pu100-t3-config
+            name: ml-tracking-pu200-t3-config
       restartPolicy: Never
             

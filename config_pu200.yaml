@@ -57,6 +57,6 @@ eta_cut: null
 pt_bins_start: 0.8
 pt_bins_end: 2.0
 pt_bins_count: 50
-eta_bins_start: -2.5
-eta_bins_end: 2.5
+eta_bins_start: -2.4
+eta_bins_end: 2.4
 eta_bins_count: 50
