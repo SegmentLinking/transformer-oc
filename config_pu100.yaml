@@ -1,5 +1,6 @@
 train_data_dir: ./data/pu100_t3_layer/train
 val_data_dir: ./data/pu100_t3_layer/val
+test_data_dir: ./data/pu200_t3/test
 
 train_subset: null
 val_subset: null
