@@ -73,3 +73,29 @@ kubectl -n cern-cms-gpu-tracking exec -it deploy/ml-tracking-data -- du -hs /dat
 13G	/data/pu200_t3/val
 ```
 
+The torch tensors are designed to be easy for ML training. Each file written is a "graph", but there no actual graph involved. It's just a container of named tensors.
+
+```
+graph = Data(x=node_features, sim_index=target_flat, sim_features=sim_features, md_layer=md_layer, md_simIdx=md_simIdx)
+```
+
+They are:
+
+- `x=node_features`: the reco variables used to describe a T3
+- `sim_index=target_flat`: the T3 sim index
+- `sim_features=sim_features`: sim pt, eta, ...
+- `md_layer=md_layer`: the layer of the constituent MDs
+- `md_simIdx=md_simIdx`: the sim index of the constituent MDs
+
+The first event, for example, looks like:
+
+```
+>>> import torch
+>>> g = torch.load("after/graph_0.pt", weights_only=False)
+>>> type(g)
+<class 'torch_geometric.data.data.Data'>
+>>> g
+Data(x=[63731, 49], sim_index=[63731], sim_features=[384, 8], md_layer=[63731, 4], md_simIdx=[63731, 4])
+# ^ these are shapes of the first event
+```
+
