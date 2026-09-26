@@ -108,24 +108,27 @@ Data(x=[63731, 49], sim_index=[63731], sim_features=[384, 8], md_layer=[63731, 4
 
 ## Training environment
 
-Aashay's docker image is hosted on DockerHub at https://hub.docker.com/r/aaarora/ml-tracking. The size is 13.8 GB, not terrible, and Alex made a copy on uaf.
+Aashay's docker image is hosted on DockerHub at https://hub.docker.com/r/aaarora/ml-tracking. The size is 13.8 GB, not terrible, and Alex made a copy on `/ceph`:
 
 ```
 export APPTAINER_CACHEDIR=/data/userdata/atuna
 export APPTAINER_TMPDIR=/data/userdata/atuna
 apptainer pull ml-tracking.sif docker://aaarora/ml-tracking:latest
 ls -ltrh /ceph/users/atuna/ml-tracking.sif
+-rwxrwxr-x 1 atuna atuna 14G Sep 25 17:58 /ceph/users/atuna/ml-tracking.sif
 ```
 
-You can open the container for a quick test like:
+I tried running on the `phi3` and `cgpu-1` machines, which have at least one GPU, to confirm pytorch is happy:
 
 ```
-$ apptainer exec --cleanenv ml-tracking.sif /bin/bash
+atuna@cgpu-1 ~$ apptainer exec --nv ml-tracking.sif /bin/bash
 Apptainer> python3
 Python 3.10.12 (main, Aug 15 2025, 14:32:43) [GCC 11.4.0] on linux
 Type "help", "copyright", "credits" or "license" for more information.
 >>> import torch
->>> torch.__version__
-'2.5.0+cu121'
+>>> print(torch.__version__)
+2.5.0+cu121
+>>> print(torch.cuda.is_available())
+True
 >>>
 ```
