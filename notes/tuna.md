@@ -34,7 +34,7 @@ And in case Aashay's home directory gets expunged, Alex made a copy here:
 /ceph/users/atuna/work/cms_tracking_ml/data/output_pu200/
 ```
 
-## Environment
+## Pre-processing environment
 
 Alex is running on uaf3 for now.
 
@@ -73,7 +73,14 @@ kubectl -n cern-cms-gpu-tracking exec -it deploy/ml-tracking-data -- du -hs /dat
 13G	/data/pu200_t3/val
 ```
 
-The torch tensors are designed to be easy for ML training. Each file written is a "graph", but there no actual graph involved. It's just a container of named tensors.
+The pre-processed pytorch (`.pt`) files are also copied on uaf:
+
+```
+53G /ceph/users/atuna/work/cms_tracking_ml/transformer-oc/data/pu200_t3/train
+13G /ceph/users/atuna/work/cms_tracking_ml/transformer-oc/data/pu200_t3/val
+```
+
+The torch tensors are designed to be easy for ML training. Each file written is a "graph", but there no actual graph involved. It's just a container of named tensors. This is sometimes called a "point cloud".
 
 ```
 graph = Data(x=node_features, sim_index=target_flat, sim_features=sim_features, md_layer=md_layer, md_simIdx=md_simIdx)
@@ -99,3 +106,26 @@ Data(x=[63731, 49], sim_index=[63731], sim_features=[384, 8], md_layer=[63731, 4
 # ^ these are shapes of the first event
 ```
 
+## Training environment
+
+Aashay's docker image is hosted on DockerHub at https://hub.docker.com/r/aaarora/ml-tracking. The size is 13.8 GB, not terrible, and Alex made a copy on uaf.
+
+```
+export APPTAINER_CACHEDIR=/data/userdata/atuna
+export APPTAINER_TMPDIR=/data/userdata/atuna
+apptainer pull ml-tracking.sif docker://aaarora/ml-tracking:latest
+ls -ltrh /ceph/users/atuna/ml-tracking.sif
+```
+
+You can open the container for a quick test like:
+
+```
+$ apptainer exec --cleanenv ml-tracking.sif /bin/bash
+Apptainer> python3
+Python 3.10.12 (main, Aug 15 2025, 14:32:43) [GCC 11.4.0] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> import torch
+>>> torch.__version__
+'2.5.0+cu121'
+>>>
+```
