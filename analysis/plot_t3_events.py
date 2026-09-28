@@ -2,6 +2,7 @@
 Make a few plots of the input T3 data.
 One file contains one event.
 These files are sometimes called graphs btw.
+Each file name looks like "graph_4127.pt"
 """
 from glob import glob
 import argparse
@@ -42,6 +43,7 @@ class T3EventPlotter:
         self.output_pdf = output_pdf
         self.num_events = num_events
 
+
     def get_file_number(self, file_path: str) -> int:
         try:
             return int(file_path.split("_")[-1].split(".")[0])
@@ -69,28 +71,75 @@ class T3EventPlotter:
 
 
     def plot(self) -> None:
+        self.bins = {}
+        self.bins["pt"] = np.linspace(0, 10, 101)
+        self.bins["eta"] = np.linspace(-6, 6, 121)
+        self.bins["phi"] = np.linspace(-3.5, 3.5, 141)
+
         logger.info(f"Writing plots to {self.output_pdf} ...")
         with PdfPages(self.output_pdf) as pdf:
+
+            logger.info(f"Plotting event eta-phi")
             for event, num in zip(self.events, self.event_numbers):
                 self.plot_event(event, num, pdf)
 
+            logger.info(f"Plotting event pt")
+            for event, num in zip(self.events, self.event_numbers):
+                self.plot_pt(event, num, pdf)
+
+            logger.info(f"Plotting event eta")
+            for event, num in zip(self.events, self.event_numbers):
+                self.plot_eta(event, num, pdf)
+
+            logger.info(f"Plotting event phi")
+            for event, num in zip(self.events, self.event_numbers):
+                self.plot_phi(event, num, pdf)
+
 
     def plot_event(self, event: Any, num: int, pdf: PdfPages) -> None:
-        bins = [
-            np.linspace(-5, 5, 100),
-            np.linspace(-3.2, 3.2, 128),
-        ]
         fig, ax = plt.subplots()
         _, _, _, im = ax.hist2d(event.sim_features[:, sim.eta],
                                 event.sim_features[:, sim.phi],
-                                bins=bins,
+                                bins=[self.bins["eta"], self.bins["phi"]],
                                 cmin=CMIN,
                                 )
         ax.set_xlabel("Sim eta")
         ax.set_ylabel("Sim phi")
+        ax.text(0.1, 1.01, f"graph_{num}.pt", transform=ax.transAxes)
         fig.colorbar(im, ax=ax, pad=0.01, label="Sim particles")
         pdf.savefig(fig)
         plt.close(fig)
+
+
+    def plot_pt(self, event: Any, num: int, pdf: PdfPages) -> None:
+        fig, ax = plt.subplots()
+        ax.hist(event.sim_features[:, sim.pt], bins=self.bins["pt"])
+        ax.text(0.1, 1.01, f"graph_{num}.pt", transform=ax.transAxes)
+        ax.set_xlabel(r"Sim $p_{T}$")
+        ax.set_ylabel("Sim particles")
+        pdf.savefig(fig)
+        plt.close(fig)
+
+
+    def plot_eta(self, event: Any, num: int, pdf: PdfPages) -> None:
+        fig, ax = plt.subplots()
+        ax.hist(event.sim_features[:, sim.eta], bins=self.bins["eta"])
+        ax.text(0.1, 1.01, f"graph_{num}.pt", transform=ax.transAxes)
+        ax.set_xlabel("Sim eta")
+        ax.set_ylabel("Sim particles")
+        pdf.savefig(fig)
+        plt.close(fig)
+
+
+    def plot_phi(self, event: Any, num: int, pdf: PdfPages) -> None:
+        fig, ax = plt.subplots()
+        ax.hist(event.sim_features[:, sim.phi], bins=self.bins["phi"])
+        ax.text(0.1, 1.01, f"graph_{num}.pt", transform=ax.transAxes)
+        ax.set_xlabel("Sim phi")
+        ax.set_ylabel("Sim particles")
+        pdf.savefig(fig)
+        plt.close(fig)
+
 
 #
 # Keeping track of which columns correspond to which sim variables
