@@ -147,8 +147,8 @@ class T3EventPlotter:
 
     def plot_t3_eta_phi(self, event: Any, num: int, pdf: PdfPages) -> None:
         fig, ax = plt.subplots()
-        _, _, _, im = ax.hist2d(event.t3_features[:, t3.eta],
-                                event.t3_features[:, t3.phi],
+        _, _, _, im = ax.hist2d(event.x[:, t3.eta],
+                                event.x[:, t3.phi],
                                 bins=[self.bins["eta"], self.bins["phi"]],
                                 cmin=CMIN,
                                 )
