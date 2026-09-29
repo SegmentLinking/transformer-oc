@@ -52,7 +52,7 @@ class GraphBuilder:
 
     @staticmethod
     def _to_tensor(values, dtype=torch.float32):
-        return torch.as_tensor(np.asarray(values), dtype=dtype)
+        return torch.tensor(np.asarray(values), dtype=dtype)
 
     @staticmethod
     def _extract_graph_index(filename):
