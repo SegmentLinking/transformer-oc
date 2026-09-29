@@ -132,3 +132,32 @@ Type "help", "copyright", "credits" or "license" for more information.
 True
 >>>
 ```
+
+## Training
+
+Here's an example of how to train the network:
+
+```
+apptainer exec --nv /ceph/users/atuna/ml-tracking.sif python3 src/main.py --config config_pu200_dev.yaml
+```
+
+`config_pu200_dev.yaml` has the following changes with respect to `config_pu200.yaml`:
+
+- `train_subset: 1`, was null (i.e. 5540)
+- `val_subset: 1`, was null (i.e. 1320)
+- `epochs: 1`, was 100
+- `num_cpu_threads: 32`, was 64
+- `gpus: [0]`, was [1]
+- `accumulate_grad_batches: 1`, was 4
+
+Unfortunately, this crashes on `phi3` with an out-of-memory error:
+
+```
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.95 GiB.
+GPU 0 has a total capacity of 15.77 GiB of which 98.25 MiB is free.
+Including non-PyTorch memory, this process has 15.67 GiB memory in use.
+Of the allocated memory 13.45 GiB is allocated by PyTorch, and 1.84 GiB is reserved by PyTorch but unallocated.
+```
+
+Aashay faced out-of-memory errors many times, if I remember correctly. TBD.
+
