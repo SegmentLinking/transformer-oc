@@ -1,5 +1,11 @@
 # Notes
 
+## Links to Aashay's documentation
+
+- https://twiki.cern.ch/twiki/bin/view/CMSPublic/PhysicsResultsDP2026030
+- https://indico.cern.ch/event/1471803/contributions/6967247/attachments/3281078/5863460/CHEP26-Transformers-v5.pdf
+- https://indico.cern.ch/event/1668227/contributions/7018986/attachments/3255766/5811524/Transformer-Tracking-DP-Note.pdf (protected)
+
 ## Data
 
 The primary dataset is ttbar PU200. This is first generated from scratch as a tracking ntuple, then converted into a LSTNtuple to be pre-processed by transformer-oc.
@@ -148,7 +154,6 @@ apptainer exec --nv /ceph/users/atuna/ml-tracking.sif python3 src/main.py --conf
 - `epochs: 1`, was 100
 - `num_cpu_threads: 32`, was 64
 - `gpus: [0]`, was [1]
-- `accumulate_grad_batches: 1`, was 4
 
 Unfortunately, this crashes on `phi3` with an out-of-memory error:
 
