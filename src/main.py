@@ -151,8 +151,8 @@ class Trainer:
             trainer.save_checkpoint(final_model_path)
             print(f"Final model saved to {final_model_path}")
 
-            config_save_path = os.path.join(tb_logger.log_dir, 'config.yaml')
-            os.copy(self.config['config'], config_save_path)
+            # config_save_path = os.path.join(tb_logger.log_dir, 'config.yaml')
+            # os.copy(self.config['config'], config_save_path)
 
 def main():
     parser = argparse.ArgumentParser(description='Train Graph Neural Network for Particle Tracking')
