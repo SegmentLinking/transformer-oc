@@ -1,0 +1,17 @@
+executable = lstntuple_maker.sh
+arguments  = $(i) $(j)
+output     = logs/lstntuple_maker_$(FILENUM).$(ClusterId).$(ProcId).out
+error      = logs/lstntuple_maker_$(FILENUM).$(ClusterId).$(ProcId).err
+log        = logs/condor.$(ClusterId).$(ProcId).log
+
+# resources
+request_cpus   = 2
+request_memory = 8GB
+request_disk   = 2GB
++DESIRED_Sites = "T2_US_UCSD"
+
+# launch
+queue i, j from (
+  1 0
+  1 1
+)
