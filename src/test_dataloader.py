@@ -11,8 +11,12 @@ import pytorch_lightning as pl
 
 FNAMES = [
     "/ceph/users/atuna/work/cms_tracking_ml/transformer-oc/data/pu200_t3/train/graph_1000.pt",
-    "/ceph/users/atuna/work/cms_tracking_ml/transformer-oc/data/pu200_t3/train/graph_1001.pt"
+    "/ceph/users/atuna/work/cms_tracking_ml/transformer-oc/data/pu200_t3/train/graph_1001.pt",
+    "/ceph/users/atuna/work/cms_tracking_ml/transformer-oc/data/pu200_t3/train/graph_1002.pt",
+    "/ceph/users/atuna/work/cms_tracking_ml/transformer-oc/data/pu200_t3/train/graph_1003.pt",
+    "/ceph/users/atuna/work/cms_tracking_ml/transformer-oc/data/pu200_t3/train/graph_1004.pt",
 ]
+BATCH_SIZE = 3
 
 def main():
     dm = ParticleTrackingDataModule()
@@ -29,6 +33,17 @@ def main():
         print("End of the data batch\n")
 
 
+class ParticleTrackingDataModule(pl.LightningDataModule):
+    def __init__(self):
+        super().__init__()
+
+    def train_dataloader(self):
+        return DataLoader(PCDataset(), shuffle=False, batch_size=BATCH_SIZE)
+
+    def val_dataloader(self):
+        return DataLoader(PCDataset(), shuffle=False, batch_size=BATCH_SIZE)
+
+
 class PCDataset(Dataset):
     def __init__(self):
         pass
@@ -39,17 +54,6 @@ class PCDataset(Dataset):
     def __getitem__(self, idx):
         print(f"PCDataset loading {idx}")
         return torch.load(FNAMES[idx], weights_only=False)
-
-
-class ParticleTrackingDataModule(pl.LightningDataModule):
-    def __init__(self):
-        super().__init__()
-
-    def train_dataloader(self):
-        return DataLoader(PCDataset(), shuffle=False)
-
-    def val_dataloader(self):
-        return DataLoader(PCDataset(), shuffle=False)
 
 
 
