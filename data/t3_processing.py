@@ -12,26 +12,9 @@ from torch_geometric.data import Data
 
 import random
 
-SIM_VARS = ["sim_pt", "sim_eta", "sim_phi", "sim_q", "sim_vx", "sim_vy", "sim_vz", "sim_vtxperp"]
+from constants import SIM_VARS, T3_VARS, T3_HIT_SIMIDX, T3_HIT_LAYER, T3_PMATCHED, LS_INDEX, LS_VARS, MD_VARS, MD_INDEX
+from constants import TARGET, FAKE_TARGET, LAYER_INFO, MD_SIMIDX, ALL_COLUMNS, MAX_T3_PT, UNMATCHED
 
-T3_VARS = ["t3_pt", "t3_eta", "t3_phi"]
-LS_INDEX = ["t3_lsIdx0", "t3_lsIdx1"]
-
-LS_VARS = ["ls_dPhis", "ls_dPhiChanges", "ls_dAlphaInners", "ls_dAlphaOuters", "ls_dAlphaInnerOuters"]
-
-MD_VARS = ["md_anchor_x", "md_anchor_y", "md_anchor_z", "md_other_x", "md_other_y", "md_other_z", "md_dphi", "md_dphichange", "md_dz"]
-MD_INDEX = ["ls_mdIdx0", "ls_mdIdx1"]
-
-TARGET = ["t3_simIdx"]
-
-FAKE_TARGET = ["t3_isFake"]
-
-LAYER_INFO = ["md_layer"]
-MD_SIMIDX = ["md_simIdx"]
-
-ALL_COLUMNS = SIM_VARS + T3_VARS + LS_INDEX + LS_VARS + MD_VARS + MD_INDEX + TARGET + FAKE_TARGET + LAYER_INFO + MD_SIMIDX
-
-MAX_T3_PT = 2000
 
 class GraphBuilder:
     def __init__(self, input_paths, output_path, train_split=0.8):
@@ -145,6 +128,15 @@ class GraphBuilder:
             md_simIdx = ak.to_dataframe(event_data[MD_SIMIDX]).values[md_idx_flat]
             md_simIdx = md_simIdx.reshape(-1, 4)
 
+            hit_simIdx = convert_hit_simIdx_to_array(event_data[T3_HIT_SIMIDX])
+            pMatched_by_hand = calculate_pMatched(hit_simIdx)
+            pMatched_ntuple = ak.to_dataframe(event_data[T3_PMATCHED]).values.flatten()
+            n_mismatch = np.sum(~np.isclose(pMatched_by_hand, pMatched_ntuple, atol=1e-4))
+            if n_mismatch > 0:
+                raise ValueError(f"Mismatch between calculated pMatched and ntuple pMatched for graph {idx}")
+            hit_simIdx = hit_simIdx[pt_mask]
+            hit_layer = ak.to_dataframe(event_data[T3_HIT_LAYER])[pt_mask].values
+
             target_np = ak.to_dataframe(event_data[TARGET])[pt_mask].values
 
             if args.nofakes:
@@ -153,6 +145,8 @@ class GraphBuilder:
                 target_flat = self._to_tensor(target_np[fake_mask]).flatten()
                 md_layer = self._to_tensor(md_layer[fake_mask])
                 md_simIdx = self._to_tensor(md_simIdx[fake_mask])
+                hit_simIdx = self._to_tensor(hit_simIdx[fake_mask])
+                hit_layer = self._to_tensor(hit_layer[fake_mask])
 
             else:
                 node_features_np = np.concatenate([t3_features, ls_features, md_features], axis=1)
@@ -160,11 +154,16 @@ class GraphBuilder:
                 target_flat[target_flat < 0] = -999999
                 md_layer = self._to_tensor(md_layer)
                 md_simIdx = self._to_tensor(md_simIdx)
+                hit_simIdx = self._to_tensor(hit_simIdx)
+                hit_layer = self._to_tensor(hit_layer)
 
             node_features = self._to_tensor(node_features_np)
             sim_features = self._to_tensor(ak.to_dataframe(event_data[SIM_VARS]).values)
 
-            graph = Data(x=node_features, sim_index=target_flat, sim_features=sim_features, md_layer=md_layer, md_simIdx=md_simIdx)
+            graph = Data(x=node_features,
+                         sim_index=target_flat, sim_features=sim_features,
+                         md_layer=md_layer, md_simIdx=md_simIdx,
+                         hit_layer=hit_layer, hit_simIdx=hit_simIdx)
             if args.debug:
                 print(graph)
                 return
@@ -231,6 +230,82 @@ class GraphBuilder:
 
         if skipped_existing:
             print(f"Skipped {skipped_existing} existing graph indices before read/submit.")
+
+
+def convert_hit_simIdx_to_array(t3_hit_simIdx: ak.Array) -> np.ndarray:
+    """
+    Collapse the per-hit lists of sim indices into one sim index per hit.
+
+    Input: one event, with fields T3_HIT_SIMIDX, each of shape (n_t3, var).
+    Output: integer array of shape (n_t3, 6). Unmatched hits get UNMATCHED.
+
+    Within a T3, each hit takes whichever of its sim indices is shared by the most hits of
+    that T3, which maximizes the matched fraction of the T3 (the logic of t3_pMatched).
+
+    Example for the six hits of one T3:
+
+        input:  [[7], [7], [3, 7], [3], [], [7, 3]]
+        output: [ 7,   7,   7,      3, -999, 7    ]
+
+    Sim index 7 appears in four hits and sim index 3 in three, so the two hits with a
+    choice both take 7. The hit with only [3] keeps 3, and the empty hit is unmatched.
+    Taking the first sim index of each hit would instead give [7, 7, 3, 3, -999, 7],
+    which lowers the matched fraction of the T3 from 4/6 to 3/6.
+    """
+    n_events = len(t3_hit_simIdx)
+    if n_events != 1:
+        raise ValueError(f"Expected exactly 1 event, got {n_events}")
+
+    columns = [t3_hit_simIdx[branch][0] for branch in T3_HIT_SIMIDX] # [0] removes the event dimension
+
+    # Fast path: take the first sim index of every hit. This is already the answer
+    # for any T3 where no hit has more than one sim index.
+    result = np.stack([ak.to_numpy(ak.fill_none(ak.firsts(col), UNMATCHED)) for col in columns], axis=1)
+
+    # Slow path: only T3s where at least one hit has a choice to make
+    has_choice = np.any(np.stack([ak.to_numpy(ak.num(col)) > 1 for col in columns], axis=1), axis=1)
+    rows = np.flatnonzero(has_choice)
+    choices = [ak.to_list(col[rows]) for col in columns]
+    for i_row, row in enumerate(rows):
+        hits = [choices[it][i_row] for it in range(len(columns))]
+        result[row] = resolve_t3(hits)
+
+    return result
+
+
+def resolve_t3(hits: list) -> list:
+    # Count how many hits of this T3 each sim index appears in
+    n_hits = {}
+    for sim_idxs in hits:
+        for sim_idx in dict.fromkeys(sim_idxs):  # distinct, in order
+            n_hits[sim_idx] = n_hits.get(sim_idx, 0) + 1
+    # Rank sim indices once per T3, so that every hit breaks ties the same way:
+    # most hits first, then first appearance (sorted is stable)
+    ranking = sorted(n_hits, key=lambda sim_idx: -n_hits[sim_idx])
+    rank = {sim_idx: i for i, sim_idx in enumerate(ranking)}
+    return [min(sim_idxs, key=rank.get) if sim_idxs else UNMATCHED for sim_idxs in hits]
+
+
+def calculate_pMatched(t3_hit_simIdx: np.ndarray) -> np.ndarray:
+    """
+    Recalculate t3_pMatched from the output of convert_hit_simIdx_to_array.
+
+    Input: integer array of shape (n_t3, n_hits). Output: float array of shape (n_t3,).
+
+    Mirrors matchedSimTrkIdxsAndFracs in trkCore.cc: find the most common sim index among the
+    hits (ties: whichever appears first), where unmatched counts as its own category.
+    If unmatched is the most common, pMatched is 0.
+    """
+    n_t3, n_hits = t3_hit_simIdx.shape
+    # counts[i, j]: number of hits in T3 i which share the sim index of hit j
+    same = t3_hit_simIdx[:, :, None] == t3_hit_simIdx[:, None, :]
+    counts = same.sum(axis=2)
+    best_hit = np.argmax(counts, axis=1)  # argmax returns the first maximum
+    rows = np.arange(n_t3)
+    best_simIdx = t3_hit_simIdx[rows, best_hit]
+    best_count = counts[rows, best_hit]
+    return np.where(best_simIdx == UNMATCHED, 0.0, best_count / n_hits)
+
 
 if __name__ == "__main__":
     argparser = ArgumentParser()
