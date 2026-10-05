@@ -6,6 +6,8 @@ __pycache__/
 *.tmp
 data/*
 !data/*.py
+!data/*.sh
+!data/*.sub
 output/
 nohup.out
 *.png
