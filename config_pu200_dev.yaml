@@ -2,8 +2,8 @@ train_data_dir: ./data/pu200_t3/train
 val_data_dir: ./data/pu200_t3/val
 test_data_dir: ./data/pu200_t3/test
 
-train_subset: 64
-val_subset: 16
+train_subset: 1
+val_subset: 1
 
 debug: true
 
@@ -19,7 +19,7 @@ max_neighbors: 16
 
 learning_rate: 0.0001  
 weight_decay: 0.0001   
-epochs: 4
+epochs: 1
 num_workers: 4
 
 scheduler_gamma: 0.5
