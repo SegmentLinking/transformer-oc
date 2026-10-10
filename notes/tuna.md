@@ -1,0 +1,168 @@
+# Notes
+
+## Links to Aashay's documentation
+
+- https://twiki.cern.ch/twiki/bin/view/CMSPublic/PhysicsResultsDP2026030
+- https://indico.cern.ch/event/1471803/contributions/6967247/attachments/3281078/5863460/CHEP26-Transformers-v5.pdf
+- https://indico.cern.ch/event/1668227/contributions/7018986/attachments/3255766/5811524/Transformer-Tracking-DP-Note.pdf (protected)
+
+## Data
+
+The primary dataset is ttbar PU200. This is first generated from scratch as a tracking ntuple, then converted into a LSTNtuple to be pre-processed by transformer-oc.
+
+Alex generated ttbar tracking ntuples is here:
+
+```
+# Code to generating tracking ntuples
+/ceph/users/atuna/CMSSW_15_1_0_pre4/src/ttbar/n1e3_PU200/workflow.sh
+
+# One of the tracking ntuples
+/ceph/users/atuna/CMSSW_15_1_0_pre4/src/ttbar/n1e3_PU200/trackingNtuple_1.root
+```
+
+Aashay converted these to LSTNtuples. They can be found in a NRP PVC here:
+
+```
+kubectl -n cern-cms-gpu-tracking get pvc
+kubectl -n cern-cms-gpu-tracking apply -f misc/nrp/data/data.yaml
+kubectl -n cern-cms-gpu-tracking exec -it deploy/ml-tracking-data -- ls /data/input/output_pu200
+```
+
+Or on uaf3 here:
+
+```
+/home/users/aaarora/phys/tracking/lst/lstod/CMSSW_15_1_0_pre2/src/RecoTracker/LSTCore/standalone/output_pu200/
+```
+
+And in case Aashay's home directory gets expunged, Alex made a copy here:
+
+```
+/ceph/users/atuna/work/cms_tracking_ml/data/output_pu200/
+```
+
+## Pre-processing environment
+
+Alex is running on uaf3 for now.
+
+Start a new environment like:
+
+```
+# NB: I might need "torch==2.5.1" for compatibility with FastGraphCompute
+# Skipping that for now for simplicity
+cd ~/work/cms_tracking_ml/
+python3.12 -m venv venv
+source venv/bin/activate
+pip install torch torch_geometric uproot awkward pandas numpy
+du -hs venv # 5.5GB
+```
+
+Start the existing environment like:
+
+```
+source venv/bin/activate
+```
+
+## Pre-processing
+
+This step converts LSTNtuples into torch tensors saved on disk. You can run on one event quickly like:
+
+```
+cd transformer-oc/data/
+python t3_processing.py --seed 42 --input ../../data/output_pu200/output_pu200_0.root --n_events 1
+```
+
+Aashay's pre-processing is available in the same PVC:
+
+```
+kubectl -n cern-cms-gpu-tracking exec -it deploy/ml-tracking-data -- du -hs /data/pu200_t3/train /data/pu200_t3/val
+53G	/data/pu200_t3/train
+13G	/data/pu200_t3/val
+```
+
+The pre-processed pytorch (`.pt`) files are also copied on uaf:
+
+```
+53G /ceph/users/atuna/work/cms_tracking_ml/transformer-oc/data/pu200_t3/train
+13G /ceph/users/atuna/work/cms_tracking_ml/transformer-oc/data/pu200_t3/val
+```
+
+The torch tensors are designed to be easy for ML training. Each file written is a "graph", but there no actual graph involved. It's just a container of named tensors. This is sometimes called a "point cloud".
+
+```
+graph = Data(x=node_features, sim_index=target_flat, sim_features=sim_features, md_layer=md_layer, md_simIdx=md_simIdx)
+```
+
+They are:
+
+- `x=node_features`: the reco variables used to describe a T3
+- `sim_index=target_flat`: the T3 sim index
+- `sim_features=sim_features`: sim pt, eta, ...
+- `md_layer=md_layer`: the layer of the constituent MDs
+- `md_simIdx=md_simIdx`: the sim index of the constituent MDs
+
+The first event, for example, looks like:
+
+```
+>>> import torch
+>>> g = torch.load("after/graph_0.pt", weights_only=False)
+>>> type(g)
+<class 'torch_geometric.data.data.Data'>
+>>> g
+Data(x=[63731, 49], sim_index=[63731], sim_features=[384, 8], md_layer=[63731, 4], md_simIdx=[63731, 4])
+# ^ these are shapes of the first event
+```
+
+## Training environment
+
+Aashay's docker image is hosted on DockerHub at https://hub.docker.com/r/aaarora/ml-tracking. The size is 13.8 GB, not terrible, and Alex made a copy on `/ceph`:
+
+```
+export APPTAINER_CACHEDIR=/data/userdata/atuna
+export APPTAINER_TMPDIR=/data/userdata/atuna
+apptainer pull ml-tracking.sif docker://aaarora/ml-tracking:latest
+ls -ltrh /ceph/users/atuna/ml-tracking.sif
+-rwxrwxr-x 1 atuna atuna 14G Sep 25 17:58 /ceph/users/atuna/ml-tracking.sif
+```
+
+I tried running on the `phi3` and `cgpu-1` machines, which have at least one GPU, to confirm pytorch is happy:
+
+```
+atuna@cgpu-1 ~$ apptainer exec --nv ml-tracking.sif /bin/bash
+Apptainer> python3
+Python 3.10.12 (main, Aug 15 2025, 14:32:43) [GCC 11.4.0] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> import torch
+>>> print(torch.__version__)
+2.5.0+cu121
+>>> print(torch.cuda.is_available())
+True
+>>>
+```
+
+## Training
+
+Here's an example of how to train the network:
+
+```
+apptainer exec --nv /ceph/users/atuna/ml-tracking.sif python3 src/main.py --config config_pu200_dev.yaml
+```
+
+`config_pu200_dev.yaml` has the following changes with respect to `config_pu200.yaml`:
+
+- `train_subset: 1`, was null (i.e. 5540)
+- `val_subset: 1`, was null (i.e. 1320)
+- `epochs: 1`, was 100
+- `num_cpu_threads: 32`, was 64
+- `gpus: [0]`, was [1]
+
+Unfortunately, this crashes on `phi3` with an out-of-memory error:
+
+```
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.95 GiB.
+GPU 0 has a total capacity of 15.77 GiB of which 98.25 MiB is free.
+Including non-PyTorch memory, this process has 15.67 GiB memory in use.
+Of the allocated memory 13.45 GiB is allocated by PyTorch, and 1.84 GiB is reserved by PyTorch but unallocated.
+```
+
+Aashay faced out-of-memory errors many times, if I remember correctly. TBD.
+
