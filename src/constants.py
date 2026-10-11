@@ -1,3 +1,13 @@
+import math
+
+# Raw (pre-normalization) column positions in T3 node features
+T3_ETA_COLUMN = 1
+T3_PHI_COLUMN = 2
+
+# Range from which random eta/phi mask centers are drawn
+ETA_MIN, ETA_MAX = -2.6, 2.6
+PHI_MIN, PHI_MAX = -math.pi, math.pi
+
 # Per-feature min/max used to normalize node features in PCDataset, by graph type.
 # Feature 0 (pT) is log-transformed before normalization.
 
