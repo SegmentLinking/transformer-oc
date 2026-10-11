@@ -3,6 +3,11 @@
 import argparse
 import os
 import json
+
+# Must be set before torch initializes CUDA. Masked events vary in size, and
+# expandable segments greatly reduce allocator fragmentation for them.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import pytorch_lightning as pl
 
