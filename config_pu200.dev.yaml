@@ -2,8 +2,8 @@ train_data_dir: ./data/pu200_t3/train
 val_data_dir: ./data/pu200_t3/val
 test_data_dir: ./data/pu200_t3/test
 
-train_subset: 16
-val_subset: 8
+train_subset: 64
+val_subset: 16
 
 debug: true
 
