@@ -8,6 +8,9 @@ T3_PHI_COLUMN = 2
 ETA_MIN, ETA_MAX = -2.6, 2.6
 PHI_MIN, PHI_MAX = -math.pi, math.pi
 
+# Unit conversions
+BYTES_PER_GB = 1e9
+
 # Per-feature min/max used to normalize node features in PCDataset, by graph type.
 # Feature 0 (pT) is log-transformed before normalization.
 

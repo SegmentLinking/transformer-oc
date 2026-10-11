@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import MultiStepLR
 
+from constants import BYTES_PER_GB
 from utils.object_condensation import ObjectCondensation
 from utils.torch_geometric_interface import row_splits_from_strict_batch as batch_to_rowsplits
 
@@ -316,9 +317,13 @@ class TransformerLightningModule(pl.LightningModule):
         
         self.log('train_beta_mean', beta.mean(), on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
         self.log('train_beta_std', beta.std(), on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
-        
+
+        if torch.cuda.is_available():
+            self.log('gpu_mem_peak_gb', torch.cuda.max_memory_allocated() / BYTES_PER_GB, on_step=True, prog_bar=True)
+            self.log('gpu_mem_reserved_peak_gb', torch.cuda.max_memory_reserved() / BYTES_PER_GB, on_step=True, prog_bar=True)
+
         del model_out, L_att, L_rep, L_beta
-        
+
         return tot_loss_batch
 
     def validation_step(self, data):
