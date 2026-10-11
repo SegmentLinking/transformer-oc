@@ -25,13 +25,21 @@ class ParticleTrackingDataModule(pl.LightningDataModule):
         
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
+            mask_kwargs = {
+                "eta_mask_center": self.config["eta_mask_center"],
+                "phi_mask_center": self.config["phi_mask_center"],
+                "eta_mask_half_width": self.config["eta_mask_half_width"],
+                "phi_mask_half_width": self.config["phi_mask_half_width"],
+            }
             self.train_dataset = PCDataset(
                 self.config['train_data_dir'],
                 subset=self.config.get('train_subset', None),
+                **mask_kwargs,
             )
             self.val_dataset = PCDataset(
                 self.config['val_data_dir'],
                 subset=self.config.get('val_subset', None),
+                **mask_kwargs,
             )
             
     def train_dataloader(self):
@@ -151,8 +159,6 @@ class Trainer:
             trainer.save_checkpoint(final_model_path)
             print(f"Final model saved to {final_model_path}")
 
-            config_save_path = os.path.join(tb_logger.log_dir, 'config.yaml')
-            os.copy(self.config['config'], config_save_path)
 
 def main():
     parser = argparse.ArgumentParser(description='Train Graph Neural Network for Particle Tracking')
