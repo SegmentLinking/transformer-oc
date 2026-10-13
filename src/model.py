@@ -320,7 +320,6 @@ class TransformerLightningModule(pl.LightningModule):
 
         if torch.cuda.is_available():
             self.log('gpu_mem_peak_gb', torch.cuda.max_memory_allocated() / BYTES_PER_GB, on_step=True, prog_bar=True)
-            self.log('gpu_mem_reserved_peak_gb', torch.cuda.max_memory_reserved() / BYTES_PER_GB, on_step=True, prog_bar=True)
 
         del model_out, L_att, L_rep, L_beta
 
