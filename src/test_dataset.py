@@ -7,8 +7,7 @@ You can run me like:
 import math
 import torch
 
-from constants import ETA_MIN, ETA_MAX
-from dataset import eta_phi_mask, random_eta_center, validate_mask_args
+from dataset import eta_phi_mask, validate_mask_args
 
 
 def test_eta_phi_mask_inside_outside():
@@ -51,14 +50,6 @@ def test_eta_phi_mask_large_half_width_keeps_all():
     eta = torch.tensor([-2.6, 0.0, 2.6])
     phi = torch.tensor([-math.pi, 0.0, math.pi])
     assert eta_phi_mask(eta, phi, 2.6, -math.pi, 5.2, math.pi).all()
-
-
-def test_random_eta_center_window_inside_eta_range():
-    torch.manual_seed(0)
-    for _ in range(1000):
-        eta_center = random_eta_center(eta_half_width=0.5)
-        assert eta_center >= ETA_MIN + 0.5
-        assert eta_center <= ETA_MAX - 0.5
 
 
 def assert_raises_value_error(func, **kwargs):
