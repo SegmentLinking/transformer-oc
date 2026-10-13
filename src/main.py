@@ -70,26 +70,64 @@ class ParticleTrackingDataModule(pl.LightningDataModule):
         return self.train_dataset.get_feature_dims()
 
 
+def describe_events(batch):
+    """
+    Describe each event in a batch: file name, number of T3s after masking, and the
+    mask center. Centers use 9 significant digits, which represents any float32 exactly,
+    so the mask can be reproduced offline.
+    """
+    n_t3s = torch.diff(batch.ptr).tolist()
+    eta_centers = batch.eta_mask_center.tolist()
+    phi_centers = batch.phi_mask_center.tolist()
+    descriptions = []
+    for name, n, eta, phi in zip(batch.filename, n_t3s, eta_centers, phi_centers):
+        center = f"eta_center={eta:.6g}, phi_center={phi:.6g}"
+        descriptions.append(f"{name} ({n} T3s, {center})")
+    return "; ".join(descriptions)
+
+
 def format_metrics(metrics):
     """Format a dict of metrics as 'name=value, name=value'."""
     return ", ".join(f"{name}={float(value):.4g}" for name, value in metrics.items())
 
 
 class PrintProgress(pl.Callback):
-    """Print plain lines instead of a progress bar, for readable log files."""
+    """Print plain progress lines, and save them to train.log in the run's directory."""
+
+    def __init__(self):
+        self.log_file = None
+
+    def on_fit_start(self, trainer, pl_module):
+        if trainer.is_global_zero:
+            path = os.path.join(trainer.log_dir, "train.log")
+            self.log_file = open(path, "a")
+
+    def teardown(self, trainer, pl_module, stage):
+        if self.log_file is not None:
+            self.log_file.close()
+            self.log_file = None
+
+    def write(self, line):
+        print(line, flush=True)
+        if self.log_file is not None:
+            self.log_file.write(line + "\n")
+            self.log_file.flush()
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         epoch = trainer.current_epoch
         n_batches = trainer.num_training_batches
+        events = describe_events(batch)
         metrics = format_metrics(trainer.progress_bar_metrics)
-        print(f"epoch {epoch} batch {batch_idx + 1}/{n_batches}: {metrics}", flush=True)
+        prefix = f"epoch {epoch} batch {batch_idx + 1}/{n_batches}"
+        self.write(f"{prefix} {events}: {metrics}")
 
     def on_validation_end(self, trainer, pl_module):
         if trainer.sanity_checking:
             return
         epoch = trainer.current_epoch
-        val = {k: v for k, v in trainer.callback_metrics.items() if k.startswith("val_")}
-        print(f"epoch {epoch} validation: {format_metrics(val)}", flush=True)
+        metrics = trainer.callback_metrics
+        val = {k: v for k, v in metrics.items() if k.startswith("val_")}
+        self.write(f"epoch {epoch} validation: {format_metrics(val)}")
 
 
 class Trainer:
