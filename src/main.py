@@ -70,6 +70,28 @@ class ParticleTrackingDataModule(pl.LightningDataModule):
         return self.train_dataset.get_feature_dims()
 
 
+def format_metrics(metrics):
+    """Format a dict of metrics as 'name=value, name=value'."""
+    return ", ".join(f"{name}={float(value):.4g}" for name, value in metrics.items())
+
+
+class PrintProgress(pl.Callback):
+    """Print plain lines instead of a progress bar, for readable log files."""
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        epoch = trainer.current_epoch
+        n_batches = trainer.num_training_batches
+        metrics = format_metrics(trainer.progress_bar_metrics)
+        print(f"epoch {epoch} batch {batch_idx + 1}/{n_batches}: {metrics}", flush=True)
+
+    def on_validation_end(self, trainer, pl_module):
+        if trainer.sanity_checking:
+            return
+        epoch = trainer.current_epoch
+        val = {k: v for k, v in trainer.callback_metrics.items() if k.startswith("val_")}
+        print(f"epoch {epoch} validation: {format_metrics(val)}", flush=True)
+
+
 class Trainer:
     def __init__(self, config):
         self.config = config
@@ -128,7 +150,7 @@ class Trainer:
             max_depth=2,
         )
         
-        callbacks = [checkpoint_callback, lr_monitor, model_summary]
+        callbacks = [checkpoint_callback, lr_monitor, model_summary, PrintProgress()]
         if not debug_mode:
             callbacks.append(early_stopping)
 
@@ -142,7 +164,7 @@ class Trainer:
             accelerator=accelerator,
             devices=(self.config.get('gpus', [1]) if isinstance(self.config.get('gpus'), list) else self.config.get('gpus', 1)),
             strategy="auto",
-            enable_progress_bar=True,
+            enable_progress_bar=False,
             check_val_every_n_epoch=self.config.get('check_val_every_n_epoch', 5),
             log_every_n_steps=self.config.get('log_every_n_steps', 50),
             enable_checkpointing=True,
