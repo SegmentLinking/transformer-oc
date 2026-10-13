@@ -38,7 +38,7 @@ class PCDataset(Dataset):
         self.phi_mask_half_width = phi_mask_half_width
 
         self.graph_files = glob.glob(os.path.join(data_dir, "graph_*.pt"))
-        self.graph_files.sort()
+        self.graph_files.sort(key=lambda fn: int(os.path.basename(fn).removeprefix("graph_").removesuffix(".pt")))
 
         if len(self.graph_files) == 0:
             raise ValueError(f"No graph files found in {data_dir}")
@@ -49,9 +49,9 @@ class PCDataset(Dataset):
     def __getitem__(self, idx):
         graph_path = self.graph_files[idx]
         graph = torch.load(graph_path, map_location='cpu', weights_only=False)
+        graph.filename = os.path.basename(graph_path)
 
-        if self.eta_mask_half_width is not None or self.phi_mask_half_width is not None:
-            self.apply_eta_phi_mask(graph)
+        self.apply_eta_phi_mask(graph)
 
         graph.x[:, 0] = torch.log(graph.x[:, 0] + 1e-6)
 
@@ -67,7 +67,12 @@ class PCDataset(Dataset):
         return graph
 
     def apply_eta_phi_mask(self, graph):
-        """Cut all per-T3 fields of `graph` in place to the eta/phi mask region."""
+        """
+        Cut all per-T3 fields of `graph` in place to the eta/phi mask region, and
+        attach the centers used as graph.eta_mask_center and graph.phi_mask_center.
+
+        With no half widths (full event), the centers are attached and nothing is cut.
+        """
         # torch RNG, so DataLoader workers draw different centers
         eta_center = self.eta_mask_center
         phi_center = self.phi_mask_center
@@ -75,6 +80,12 @@ class PCDataset(Dataset):
             eta_center = ETA_MIN + (ETA_MAX - ETA_MIN) * torch.rand(()).item()
         if phi_center is None:
             phi_center = PHI_MIN + (PHI_MAX - PHI_MIN) * torch.rand(()).item()
+
+        graph.eta_mask_center = torch.tensor(eta_center)
+        graph.phi_mask_center = torch.tensor(phi_center)
+
+        if self.eta_mask_half_width is None and self.phi_mask_half_width is None:
+            return
 
         mask = eta_phi_mask(
             eta=graph.x[:, T3_ETA_COLUMN],
