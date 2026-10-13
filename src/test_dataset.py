@@ -61,65 +61,65 @@ def assert_raises_value_error(func, **kwargs):
 
 
 def test_validate_mask_args_full_event():
-    validate_mask_args(eta_half_width=None, eta_center=0.0, phi_half_width=None, phi_center=0.0)
+    validate_mask_args(eta_center=0.0, phi_center=0.0, eta_half_width=None, phi_half_width=None)
 
 
 def test_validate_mask_args_random_center():
-    validate_mask_args(eta_half_width=0.5, eta_center=None, phi_half_width=0.5, phi_center=None)
+    validate_mask_args(eta_center=None, phi_center=None, eta_half_width=0.5, phi_half_width=0.5)
 
 
 def test_validate_mask_args_fixed_center():
-    validate_mask_args(eta_half_width=0.5, eta_center=0.0, phi_half_width=0.5, phi_center=1.0)
+    validate_mask_args(eta_center=0.0, phi_center=1.0, eta_half_width=0.5, phi_half_width=0.5)
 
 
 def test_validate_mask_args_no_half_width_no_center_raises():
     assert_raises_value_error(
         validate_mask_args,
-        eta_half_width=None,
         eta_center=None,
-        phi_half_width=0.5,
         phi_center=None,
+        eta_half_width=None,
+        phi_half_width=0.5,
     )
     assert_raises_value_error(
         validate_mask_args,
-        eta_half_width=0.5,
         eta_center=None,
-        phi_half_width=None,
         phi_center=None,
+        eta_half_width=0.5,
+        phi_half_width=None,
     )
 
 
 def test_validate_mask_args_no_half_width_nonzero_center_raises():
     assert_raises_value_error(
         validate_mask_args,
-        eta_half_width=None,
         eta_center=1.0,
-        phi_half_width=None,
         phi_center=0.0,
+        eta_half_width=None,
+        phi_half_width=None,
     )
     assert_raises_value_error(
         validate_mask_args,
-        eta_half_width=None,
         eta_center=0.0,
-        phi_half_width=None,
         phi_center=1.0,
+        eta_half_width=None,
+        phi_half_width=None,
     )
 
 
 def test_validate_mask_args_nonpositive_half_width_raises():
     assert_raises_value_error(
         validate_mask_args,
-        eta_half_width=0.0,
         eta_center=None,
-        phi_half_width=0.5,
         phi_center=None,
+        eta_half_width=0.0,
+        phi_half_width=0.5,
     )
     assert_raises_value_error(
         validate_mask_args,
-        eta_half_width=0.5,
         eta_center=None,
-        phi_half_width=-0.5,
         phi_center=None,
+        eta_half_width=0.5,
+        phi_half_width=-0.5,
     )
 
 

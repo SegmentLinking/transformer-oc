@@ -24,19 +24,18 @@ class PCDataset(Dataset):
         self.data_dir = data_dir
         self.subset = subset if subset is not None else float('inf')
 
-        # eta/phi mask: a half width of None means no cut in that coordinate,
-        # and the center must then be 0. A center of None means it is drawn
-        # at random for every event.
+        # eta/phi mask: A center of None means it is drawn at random for every event.
+        # A half width of None means no cut in that coordinate, and the center must then be 0.
         validate_mask_args(
-            eta_half_width=eta_mask_half_width,
             eta_center=eta_mask_center,
-            phi_half_width=phi_mask_half_width,
             phi_center=phi_mask_center,
+            eta_half_width=eta_mask_half_width,
+            phi_half_width=phi_mask_half_width,
         )
-        self.eta_mask_half_width = eta_mask_half_width
-        self.phi_mask_half_width = phi_mask_half_width
         self.eta_mask_center = eta_mask_center
         self.phi_mask_center = phi_mask_center
+        self.eta_mask_half_width = eta_mask_half_width
+        self.phi_mask_half_width = phi_mask_half_width
 
         self.graph_files = glob.glob(os.path.join(data_dir, "graph_*.pt"))
         self.graph_files.sort()
@@ -71,9 +70,9 @@ class PCDataset(Dataset):
         """Cut all per-T3 fields of `graph` in place to the eta/phi mask region."""
         # torch RNG, so DataLoader workers draw different centers
         eta_center = self.eta_mask_center
+        phi_center = self.phi_mask_center
         if eta_center is None:
             eta_center = ETA_MIN + (ETA_MAX - ETA_MIN) * torch.rand(()).item()
-        phi_center = self.phi_mask_center
         if phi_center is None:
             phi_center = PHI_MIN + (PHI_MAX - PHI_MIN) * torch.rand(()).item()
 
@@ -115,7 +114,7 @@ def eta_phi_mask(eta, phi, eta_center, phi_center, eta_half_width, phi_half_widt
     return mask
 
 
-def validate_mask_args(eta_half_width, eta_center, phi_half_width, phi_center):
+def validate_mask_args(eta_center, phi_center, eta_half_width, phi_half_width):
     """
     Raise ValueError unless each coordinate's (half_width, center) is a valid mask mode:
       - half_width None, center 0: no cut in this coordinate
