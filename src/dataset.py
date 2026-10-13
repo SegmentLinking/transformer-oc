@@ -72,7 +72,7 @@ class PCDataset(Dataset):
         # torch RNG, so DataLoader workers draw different centers
         eta_center = self.eta_mask_center
         if eta_center is None:
-            eta_center = random_eta_center(eta_half_width=self.eta_mask_half_width)
+            eta_center = ETA_MIN + (ETA_MAX - ETA_MIN) * torch.rand(()).item()
         phi_center = self.phi_mask_center
         if phi_center is None:
             phi_center = PHI_MIN + (PHI_MAX - PHI_MIN) * torch.rand(()).item()
@@ -134,21 +134,4 @@ def validate_mask_args(eta_half_width, eta_center, phi_half_width, phi_center):
     elif phi_half_width <= 0:
         raise ValueError(f"phi_mask_half_width must be positive, got {phi_half_width}")
 
-
-def random_eta_center(eta_half_width):
-    """
-    Draw a random eta center such that the whole window
-    [eta_center - eta_half_width, eta_center + eta_half_width] lies within [ETA_MIN, ETA_MAX].
-
-    Raises ValueError if eta_half_width is None, or if the window is too wide
-    to fit within the eta range. Uses the torch RNG, so DataLoader workers
-    draw different centers.
-    """
-    if eta_half_width is None:
-        raise ValueError("eta_half_width must be specified")
-    low = ETA_MIN + eta_half_width
-    high = ETA_MAX - eta_half_width
-    if low >= high:
-        raise ValueError("eta_half_width is too large for the eta range")
-    return low + (high - low) * torch.rand(()).item()
 
