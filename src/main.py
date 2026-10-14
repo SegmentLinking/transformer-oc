@@ -72,23 +72,20 @@ class ParticleTrackingDataModule(pl.LightningDataModule):
 
 def describe_events(batch):
     """
-    Describe each event in a batch: file name, number of T3s after masking, and the
-    mask center. Centers use 9 significant digits, which represents any float32 exactly,
-    so the mask can be reproduced offline.
+    Describe the events in a batch as key=value pairs: file name, number of T3s after
+    masking, and mask center. With several events, values are comma-separated lists.
     """
-    n_t3s = torch.diff(batch.ptr).tolist()
-    eta_centers = batch.eta_mask_center.tolist()
-    phi_centers = batch.phi_mask_center.tolist()
-    descriptions = []
-    for name, n, eta, phi in zip(batch.filename, n_t3s, eta_centers, phi_centers):
-        center = f"eta_center={eta:.6g}, phi_center={phi:.6g}"
-        descriptions.append(f"{name} ({n} T3s, {center})")
-    return "; ".join(descriptions)
+    files = ",".join(batch.filename)
+    n_t3s = ",".join(str(n) for n in torch.diff(batch.ptr).tolist())
+    eta_centers = ",".join(f"{c:.6g}" for c in batch.eta_mask_center.tolist())
+    phi_centers = ",".join(f"{c:.6g}" for c in batch.phi_mask_center.tolist())
+    centers = f"eta_center={eta_centers} phi_center={phi_centers}"
+    return f"file={files} n_t3s={n_t3s} {centers}"
 
 
 def format_metrics(metrics):
-    """Format a dict of metrics as 'name=value, name=value'."""
-    return ", ".join(f"{name}={float(value):.4g}" for name, value in metrics.items())
+    """Format a dict of metrics as 'name=value name=value'."""
+    return " ".join(f"{name}={float(value):.4g}" for name, value in metrics.items())
 
 
 class PrintProgress(pl.Callback):
@@ -118,8 +115,8 @@ class PrintProgress(pl.Callback):
         n_batches = trainer.num_training_batches
         events = describe_events(batch)
         metrics = format_metrics(trainer.progress_bar_metrics)
-        prefix = f"epoch {epoch} batch {batch_idx + 1}/{n_batches}"
-        self.write(f"{prefix} {events}: {metrics}")
+        step = f"epoch={epoch} batch={batch_idx + 1} n_batches={n_batches}"
+        self.write(f"stage=train {step} {events} {metrics}")
 
     def on_validation_end(self, trainer, pl_module):
         if trainer.sanity_checking:
@@ -127,7 +124,7 @@ class PrintProgress(pl.Callback):
         epoch = trainer.current_epoch
         metrics = trainer.callback_metrics
         val = {k: v for k, v in metrics.items() if k.startswith("val_")}
-        self.write(f"epoch {epoch} validation: {format_metrics(val)}")
+        self.write(f"stage=val epoch={epoch} {format_metrics(val)}")
 
 
 class Trainer:
