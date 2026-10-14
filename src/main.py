@@ -3,6 +3,11 @@
 import argparse
 import os
 import json
+
+# Must be set before torch initializes CUDA. Masked events vary in size, and
+# expandable segments greatly reduce allocator fragmentation for them.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import pytorch_lightning as pl
 
@@ -25,13 +30,21 @@ class ParticleTrackingDataModule(pl.LightningDataModule):
         
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
+            mask_kwargs = {
+                "eta_mask_center": self.config["eta_mask_center"],
+                "phi_mask_center": self.config["phi_mask_center"],
+                "eta_mask_half_width": self.config["eta_mask_half_width"],
+                "phi_mask_half_width": self.config["phi_mask_half_width"],
+            }
             self.train_dataset = PCDataset(
                 self.config['train_data_dir'],
                 subset=self.config.get('train_subset', None),
+                **mask_kwargs,
             )
             self.val_dataset = PCDataset(
                 self.config['val_data_dir'],
                 subset=self.config.get('val_subset', None),
+                **mask_kwargs,
             )
             
     def train_dataloader(self):
@@ -55,6 +68,63 @@ class ParticleTrackingDataModule(pl.LightningDataModule):
     def get_feature_dims(self):
         """Get feature dimensions from the training dataset."""
         return self.train_dataset.get_feature_dims()
+
+
+def describe_events(batch):
+    """
+    Describe the events in a batch as key=value pairs: file name, number of T3s after
+    masking, and mask center. With several events, values are comma-separated lists.
+    """
+    files = ",".join(batch.filename)
+    n_t3s = ",".join(str(n) for n in torch.diff(batch.ptr).tolist())
+    eta_centers = ",".join(f"{c:.6g}" for c in batch.eta_mask_center.tolist())
+    phi_centers = ",".join(f"{c:.6g}" for c in batch.phi_mask_center.tolist())
+    centers = f"eta_center={eta_centers} phi_center={phi_centers}"
+    return f"file={files} n_t3s={n_t3s} {centers}"
+
+
+def format_metrics(metrics):
+    """Format a dict of metrics as 'name=value name=value'."""
+    return " ".join(f"{name}={float(value):.4g}" for name, value in metrics.items())
+
+
+class PrintProgress(pl.Callback):
+    """Print plain progress lines, and save them to train.log in the run's directory."""
+
+    def __init__(self):
+        self.log_file = None
+
+    def on_fit_start(self, trainer, pl_module):
+        if trainer.is_global_zero:
+            path = os.path.join(trainer.log_dir, "train.log")
+            self.log_file = open(path, "a")
+
+    def teardown(self, trainer, pl_module, stage):
+        if self.log_file is not None:
+            self.log_file.close()
+            self.log_file = None
+
+    def write(self, line):
+        print(line, flush=True)
+        if self.log_file is not None:
+            self.log_file.write(line + "\n")
+            self.log_file.flush()
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        epoch = trainer.current_epoch
+        n_batches = trainer.num_training_batches
+        events = describe_events(batch)
+        metrics = format_metrics(trainer.progress_bar_metrics)
+        step = f"epoch={epoch} batch={batch_idx + 1} n_batches={n_batches}"
+        self.write(f"stage=train {step} {events} {metrics}")
+
+    def on_validation_end(self, trainer, pl_module):
+        if trainer.sanity_checking:
+            return
+        epoch = trainer.current_epoch
+        metrics = trainer.callback_metrics
+        val = {k: v for k, v in metrics.items() if k.startswith("val_")}
+        self.write(f"stage=val epoch={epoch} {format_metrics(val)}")
 
 
 class Trainer:
@@ -115,7 +185,7 @@ class Trainer:
             max_depth=2,
         )
         
-        callbacks = [checkpoint_callback, lr_monitor, model_summary]
+        callbacks = [checkpoint_callback, lr_monitor, model_summary, PrintProgress()]
         if not debug_mode:
             callbacks.append(early_stopping)
 
@@ -129,7 +199,7 @@ class Trainer:
             accelerator=accelerator,
             devices=(self.config.get('gpus', [1]) if isinstance(self.config.get('gpus'), list) else self.config.get('gpus', 1)),
             strategy="auto",
-            enable_progress_bar=True,
+            enable_progress_bar=False,
             check_val_every_n_epoch=self.config.get('check_val_every_n_epoch', 5),
             log_every_n_steps=self.config.get('log_every_n_steps', 50),
             enable_checkpointing=True,
@@ -151,8 +221,6 @@ class Trainer:
             trainer.save_checkpoint(final_model_path)
             print(f"Final model saved to {final_model_path}")
 
-            config_save_path = os.path.join(tb_logger.log_dir, 'config.yaml')
-            os.copy(self.config['config'], config_save_path)
 
 def main():
     parser = argparse.ArgumentParser(description='Train Graph Neural Network for Particle Tracking')
