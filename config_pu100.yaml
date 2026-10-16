@@ -41,6 +41,9 @@ accumulate_grad_batches: 4
 check_val_every_n_epoch: 5
 precision: 16
 
+# Timing report: null (off) or simple
+profiler: null
+
 oc_q_min: 0.1
 oc_s_B: 1.0
 oc_repulsive_chunk_size: 16
