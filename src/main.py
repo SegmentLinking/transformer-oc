@@ -95,6 +95,7 @@ class PrintProgress(pl.Callback):
 
     def __init__(self):
         self.log_file = None
+        self.batch_start = None
         self.epoch_start = None
 
     def on_fit_start(self, trainer, pl_module):
@@ -116,6 +117,9 @@ class PrintProgress(pl.Callback):
     def on_train_epoch_start(self, trainer, pl_module):
         self.epoch_start = time.perf_counter()
 
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        self.batch_start = time.perf_counter()
+
     def on_train_epoch_end(self, trainer, pl_module):
         # Wall time of the epoch, including validation in epochs where it runs
         epoch_s = time.perf_counter() - self.epoch_start
@@ -127,8 +131,10 @@ class PrintProgress(pl.Callback):
         n_batches = trainer.num_training_batches
         events = describe_events(batch)
         metrics = format_metrics(trainer.progress_bar_metrics)
+        batch_s = time.perf_counter() - self.batch_start
+        timing = f"batch_s={batch_s:.3f}"
         step = f"epoch={epoch} batch={batch_idx + 1} n_batches={n_batches}"
-        self.write(f"stage=train {step} {events} {metrics}")
+        self.write(f"stage=train {step} {events} {metrics} {timing}")
 
     def on_validation_end(self, trainer, pl_module):
         if trainer.sanity_checking:
