@@ -2,8 +2,8 @@ train_data_dir: ./data/pu200_t3/train
 val_data_dir: ./data/pu200_t3/val
 test_data_dir: ./data/pu200_t3/test
 
-train_subset: 128
-val_subset: 32
+train_subset: 512
+val_subset: 128
 
 debug: true
 
@@ -14,16 +14,18 @@ num_layers: 6
 nhead: 8        
 latent_dim: 128     
 dropout: 0.1
-dr_threshold: 0.4
+dr_threshold: 0.1
 max_neighbors: 16
+# Scale embeddings to unit length (onto a sphere)
+normalize_embeddings: true
 
 # eta/phi mask on T3s
 # half_width=null -> no cut in that coordinate (center must then be 0)
 # center=null -> random center for every event
-eta_mask_half_width: 1.0
-phi_mask_half_width: 1.0
-eta_mask_center: 0.0
-phi_mask_center: 0.0
+eta_mask_half_width: 1.5
+phi_mask_half_width: 1.5
+eta_mask_center: null
+phi_mask_center: null
 
 learning_rate: 0.0001  
 weight_decay: 0.0001   
@@ -44,6 +46,10 @@ precision: 16
 oc_q_min: 0.1
 oc_s_B: 1.0
 oc_repulsive_chunk_size: 16
+
+# Loss: oc (object condensation) or contrastive (Hadsell-Chopra-LeCun pairs)
+loss: oc
+contrastive_margin: 1.0
 
 loss_weight_attractive: 1.0
 loss_weight_repulsive: 1.0

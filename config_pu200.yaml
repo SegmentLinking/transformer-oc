@@ -16,6 +16,8 @@ latent_dim: 128
 dropout: 0.1
 dr_threshold: 0.4
 max_neighbors: 64
+# Scale embeddings to unit length (onto a sphere)
+normalize_embeddings: true
 
 # eta/phi mask on T3s
 # half_width=null -> no cut in that coordinate (center must then be 0)
@@ -44,6 +46,10 @@ precision: 16
 oc_q_min: 0.1
 oc_s_B: 1.0
 oc_repulsive_chunk_size: 16
+
+# Loss: oc (object condensation) or contrastive (Hadsell-Chopra-LeCun pairs)
+loss: oc
+contrastive_margin: 1.0
 
 loss_weight_attractive: 1.0
 loss_weight_repulsive: 1.0

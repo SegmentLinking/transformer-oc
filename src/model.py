@@ -5,7 +5,7 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import MultiStepLR
 
 from constants import BYTES_PER_GB
-from utils.object_condensation import ObjectCondensation
+from losses import contrastive_loss
 from utils.torch_geometric_interface import row_splits_from_strict_batch as batch_to_rowsplits
 
 import pytorch_lightning as pl
@@ -98,9 +98,12 @@ class SparseTransformerLayer(nn.Module):
 
 class TransformerOCModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, num_layers, num_heads, latent_dim, dropout=0.1,
-                 dr_threshold=0.2, max_neighbors=64, attention_chunk_size=None):
+                 dr_threshold=0.2, max_neighbors=64, attention_chunk_size=None,
+                 normalize_embeddings=True):
         super().__init__()
 
+        # Scale each embedding to unit length, i.e. onto a sphere
+        self.normalize_embeddings = normalize_embeddings
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
         self.num_layers = num_layers
@@ -220,7 +223,8 @@ class TransformerOCModel(nn.Module):
             x = layer(x, neighbor_idx, neighbor_mask)
 
         coords_latent = self.latent_head(x)
-        coords_latent = F.normalize(coords_latent, p=2, dim=-1)
+        if self.normalize_embeddings:
+            coords_latent = F.normalize(coords_latent, p=2, dim=-1)
 
         eps = 1e-6
         beta = self.beta_head(x).sigmoid()
@@ -242,12 +246,15 @@ class TransformerLightningModule(pl.LightningModule):
             'dropout': config.get('dropout', 0.1),
             'dr_threshold': config.get('dr_threshold', 0.2),
             'max_neighbors': config.get('max_neighbors', 64),
+            'normalize_embeddings': config['normalize_embeddings'],
             
             'learning_rate': config['learning_rate'],
             'weight_decay': config['weight_decay'],
             'scheduler_gamma': config['scheduler_gamma'],
             'scheduler_milestones': config.get('scheduler_milestones', [10]),
             
+            'loss': config['loss'],
+            'contrastive_margin': config['contrastive_margin'],
             'loss_weight_attractive': config.get('loss_weight_attractive', 1.0),
             'loss_weight_repulsive': config.get('loss_weight_repulsive', 1.0),
             'loss_weight_beta': config.get('loss_weight_beta', 1.0),
@@ -279,84 +286,96 @@ class TransformerLightningModule(pl.LightningModule):
             dropout=self.hparams.dropout,
             dr_threshold=self.hparams.dr_threshold,
             max_neighbors=self.hparams.max_neighbors,
+            normalize_embeddings=self.hparams.normalize_embeddings,
         )
         
-        self.criterion = ObjectCondensation(
-            q_min=self.hparams.oc_q_min,
-            s_B=self.hparams.oc_s_B,
-            repulsive_chunk_size=self.hparams.oc_repulsive_chunk_size,
-        )
+        if self.hparams.loss == "oc":
+            # Imported here because fastgraphcompute needs CUDA to import, and the
+            # other losses should also work on CPU-only machines
+            from utils.object_condensation import ObjectCondensation
+
+            self.criterion = ObjectCondensation(
+                q_min=self.hparams.oc_q_min,
+                s_B=self.hparams.oc_s_B,
+                repulsive_chunk_size=self.hparams.oc_repulsive_chunk_size,
+            )
+        elif self.hparams.loss != "contrastive":
+            raise ValueError(f"Unknown loss: {self.hparams.loss}")
     
-    def training_step(self, data):
-        x, sim_index, batch = data.x.to(self.device), data.sim_index.to(self.device), data.batch.to(self.device)
+    def compute_loss(self, data):
+        """
+        Run the model on a batch and compute the configured loss.
+
+        Returns (total loss, dict of unweighted loss terms by name, model output).
+        The total is the sum of each term times its loss_weight_<name>.
+        """
+        x = data.x.to(self.device)
+        sim_index = data.sim_index.to(self.device)
+        batch = data.batch.to(self.device)
         sim_index[sim_index < 0] = -1
-        row_splits = batch_to_rowsplits(batch)
-        
+
         model_out = self.model(x, batch)
-        beta = model_out["B"].float()
         coords = model_out["H"].float()
 
-        L_att, L_rep, L_beta, _, _ = self.criterion(
-            beta=beta,
-            coords=coords,
-            asso_idx = sim_index.unsqueeze(-1).to(torch.int64),
-            row_splits = row_splits
-        )
-        
-        tot_loss_batch = (self.hparams.loss_weight_attractive * L_att + 
-                         self.hparams.loss_weight_repulsive * L_rep + 
-                         self.hparams.loss_weight_beta * L_beta)
+        if self.hparams.loss == "oc":
+            L_att, L_rep, L_beta, _, _ = self.criterion(
+                beta=model_out["B"].float(),
+                coords=coords,
+                asso_idx=sim_index.unsqueeze(-1).to(torch.int64),
+                row_splits=batch_to_rowsplits(batch),
+            )
+            terms = {"attractive": L_att, "repulsive": L_rep, "beta": L_beta}
+        else:
+            L_att, L_rep = contrastive_loss(
+                coords=coords,
+                sim_index=sim_index,
+                batch=batch,
+                margin=self.hparams.contrastive_margin,
+            )
+            terms = {"attractive": L_att, "repulsive": L_rep}
+
+        weights = {name: self.hparams[f"loss_weight_{name}"] for name in terms}
+        total = sum(weights[name] * term for name, term in terms.items())
+        return total, terms, model_out
+
+    def training_step(self, data):
+        tot_loss_batch, terms, model_out = self.compute_loss(data)
 
         self.log('train_loss', tot_loss_batch, on_step=True, on_epoch=True, prog_bar=True, batch_size=data.num_graphs, sync_dist=True)
-        self.log('train_loss_attractive', L_att, on_step=True, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
-        self.log('train_loss_repulsive', L_rep, on_step=True, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
-        self.log('train_loss_beta', L_beta, on_step=True, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
-        
+        for name, term in terms.items():
+            self.log(f'train_loss_{name}', term, on_step=True, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
+
         current_lr = self.optimizers().param_groups[0]['lr']
         self.log('learning_rate', current_lr, on_step=True, on_epoch=False, prog_bar=True, sync_dist=False)
-        
-        self.log('train_beta_mean', beta.mean(), on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
-        self.log('train_beta_std', beta.std(), on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
+
+        if self.hparams.loss == "oc":
+            beta = model_out["B"].float()
+            self.log('train_beta_mean', beta.mean(), on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
+            self.log('train_beta_std', beta.std(), on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
 
         if torch.cuda.is_available():
             self.log('gpu_mem_peak_gb', torch.cuda.max_memory_allocated() / BYTES_PER_GB, on_step=True, prog_bar=True)
 
-        del model_out, L_att, L_rep, L_beta
+        del model_out, terms
 
         return tot_loss_batch
 
     def validation_step(self, data):
-        x, sim_index, batch = data.x.to(self.device), data.sim_index.to(self.device), data.batch.to(self.device)
-        sim_index[sim_index < 0] = -1
-        row_splits = batch_to_rowsplits(batch)
-
-        model_out = self.model(x, batch)
-        beta = model_out["B"].float()
-        coords = model_out["H"].float()
-
-        L_att, L_rep, L_beta, _, _ = self.criterion(
-            beta=beta,
-            coords=coords,
-            asso_idx = sim_index.unsqueeze(-1).to(torch.int64),
-            row_splits = row_splits
-        )
-        
-        tot_loss_batch = (self.hparams.loss_weight_attractive * L_att + 
-                         self.hparams.loss_weight_repulsive * L_rep + 
-                         self.hparams.loss_weight_beta * L_beta)
+        tot_loss_batch, terms, model_out = self.compute_loss(data)
 
         self.log('val_loss', tot_loss_batch, on_step=False, on_epoch=True, prog_bar=True, batch_size=data.num_graphs, sync_dist=True)
-        self.log('val_loss_attractive', L_att, on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
-        self.log('val_loss_repulsive', L_rep, on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
-        self.log('val_loss_beta', L_beta, on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
-        
-        self.log('val_beta_mean', beta.mean(), on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
-        self.log('val_beta_std', beta.std(), on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
+        for name, term in terms.items():
+            self.log(f'val_loss_{name}', term, on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
 
-        del model_out, L_att, L_rep, L_beta
-        
+        if self.hparams.loss == "oc":
+            beta = model_out["B"].float()
+            self.log('val_beta_mean', beta.mean(), on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
+            self.log('val_beta_std', beta.std(), on_step=False, on_epoch=True, prog_bar=False, batch_size=data.num_graphs, sync_dist=True)
+
+        del model_out, terms
+
         return tot_loss_batch
-    
+
     def on_before_optimizer_step(self, optimizer):
         total_norm = 0.0
         for p in self.parameters():
