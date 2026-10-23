@@ -17,6 +17,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib import rcParams
 
 CMIN = 0.5
+CMAP = "rainbow"
 
 
 def main():
@@ -126,6 +127,7 @@ class T3EventPlotter:
                                 event.sim_features[:, sim.phi],
                                 bins=[self.bins["eta"], self.bins["phi"]],
                                 cmin=CMIN,
+                                cmap=CMAP,
                                 )
         ax.set_xlabel("Sim eta")
         ax.set_ylabel("Sim phi")
@@ -151,6 +153,7 @@ class T3EventPlotter:
                                 event.x[:, t3.phi],
                                 bins=[self.bins["eta"], self.bins["phi"]],
                                 cmin=CMIN,
+                                cmap=CMAP,
                                 )
         ax.set_xlabel("T3 eta")
         ax.set_ylabel("T3 phi")
