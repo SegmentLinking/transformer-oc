@@ -98,8 +98,12 @@ class SparseTransformerLayer(nn.Module):
 
 class TransformerOCModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, num_layers, num_heads, latent_dim, dropout=0.1,
-                 dr_threshold=0.2, max_neighbors=64, attention_chunk_size=None):
+                 dr_threshold=0.2, max_neighbors=64, attention_chunk_size=None,
+                 normalize_embeddings=True):
         super().__init__()
+
+        # Scale each embedding to unit length, i.e. onto a sphere
+        self.normalize_embeddings = normalize_embeddings
 
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
@@ -220,7 +224,8 @@ class TransformerOCModel(nn.Module):
             x = layer(x, neighbor_idx, neighbor_mask)
 
         coords_latent = self.latent_head(x)
-        coords_latent = F.normalize(coords_latent, p=2, dim=-1)
+        if self.normalize_embeddings:
+            coords_latent = F.normalize(coords_latent, p=2, dim=-1)
 
         eps = 1e-6
         beta = self.beta_head(x).sigmoid()
