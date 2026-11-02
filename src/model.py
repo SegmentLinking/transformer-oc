@@ -247,6 +247,7 @@ class TransformerLightningModule(pl.LightningModule):
             'dropout': config.get('dropout', 0.1),
             'dr_threshold': config.get('dr_threshold', 0.2),
             'max_neighbors': config.get('max_neighbors', 64),
+            'normalize_embeddings': config['normalize_embeddings'],
             
             'learning_rate': config['learning_rate'],
             'weight_decay': config['weight_decay'],
@@ -284,6 +285,7 @@ class TransformerLightningModule(pl.LightningModule):
             dropout=self.hparams.dropout,
             dr_threshold=self.hparams.dr_threshold,
             max_neighbors=self.hparams.max_neighbors,
+            normalize_embeddings=self.hparams.normalize_embeddings,
         )
         
         self.criterion = ObjectCondensation(

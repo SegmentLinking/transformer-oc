@@ -23,6 +23,7 @@ data:
     dropout: 0.1
     dr_threshold: 0.1
     max_neighbors: 64
+    normalize_embeddings: true
 
     # eta/phi mask on T3s
     # half_width=null -> no cut in that coordinate (center must then be 0)
