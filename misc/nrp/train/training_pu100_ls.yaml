@@ -22,6 +22,14 @@ data:
     latent_dim: 128
     dropout: 0.1
 
+    # eta/phi mask on T3s
+    # half_width=null -> no cut in that coordinate (center must then be 0)
+    # center=null -> random center for every event
+    eta_mask_half_width: null
+    phi_mask_half_width: null
+    eta_mask_center: 0.0
+    phi_mask_center: 0.0
+
     learning_rate: 0.0001  
     weight_decay: 0.0001   
     epochs: 100
@@ -89,11 +97,11 @@ spec:
           limits:
             memory: 32Gi
             cpu: 12
-            nvidia.com/a40: 1
+            nvidia.com/a100: 1
           requests:
             memory: 16Gi
             cpu: 8  
-            nvidia.com/a40: 1
+            nvidia.com/a100: 1
         volumeMounts:
         - mountPath: /data
           name: ml-tracking-pu100-ls-pvc
