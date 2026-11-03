@@ -51,16 +51,24 @@ class ScriptableOCModel(TransformerOCModel):
     - build_neighbor_index without its @torch.no_grad() decorator (not scriptable); callers run under no_grad.
     - F.normalize(p=2.0) instead of p=2 (TorchScript requires a float). Keep `network` in sync with
       TransformerOCModel.forward.
+
+    normalize_embeddings is set here rather than passed to TransformerOCModel, so models from
+    before the option existed (always normalized) still export.
     """
 
     build_neighbor_index = TransformerOCModel.build_neighbor_index.__wrapped__
+
+    def __init__(self, normalize_embeddings: bool = True, **kwargs):
+        super().__init__(**kwargs)
+        self.normalize_embeddings = normalize_embeddings
 
     def network(self, x_raw: torch.Tensor, neighbor_idx: torch.Tensor, neighbor_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.input_proj(x_raw)
         for layer in self.transformer_layers:
             x = layer(x, neighbor_idx, neighbor_mask)
         coords_latent = self.latent_head(x)
-        coords_latent = F.normalize(coords_latent, p=2.0, dim=-1)
+        if self.normalize_embeddings:
+            coords_latent = F.normalize(coords_latent, p=2.0, dim=-1)
         eps = 1e-6
         beta = self.beta_head(x).sigmoid()
         beta = torch.clamp(beta, eps, 1 - eps)
@@ -104,16 +112,19 @@ class ExportedOC(torch.nn.Module):
 
 
 def load_model(checkpoint, hparams):
+    # hparams.yaml from lightning_logs, or the training config (which has no input_dim; the export is 49 features)
     hp = yaml.safe_load(open(hparams))
-    kwargs = dict(input_dim=hp["input_dim"], hidden_dim=hp["hidden_dim"], num_layers=hp["num_layers"],
+    kwargs = dict(input_dim=hp.get("input_dim", len(MIN_VALS)), hidden_dim=hp["hidden_dim"], num_layers=hp["num_layers"],
                   num_heads=hp["nhead"], latent_dim=hp["latent_dim"], dropout=hp.get("dropout", 0.1),
                   dr_threshold=hp["dr_threshold"], max_neighbors=hp.get("max_neighbors", 64))
+    normalize = hp.get("normalize_embeddings", True)
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
     state = state.get("state_dict", state)
     state = {k.replace("model.", "", 1): v for k, v in state.items()}
-    eager = TransformerOCModel(**kwargs)
+    # without normalize_embeddings, src/model.py predates the option and always normalizes
+    eager = TransformerOCModel(**kwargs, **({} if "normalize_embeddings" not in hp else {"normalize_embeddings": normalize}))
     eager.load_state_dict(state, strict=True)
-    scriptable = ScriptableOCModel(**kwargs)
+    scriptable = ScriptableOCModel(normalize_embeddings=normalize, **kwargs)
     scriptable.load_state_dict(state, strict=True)
     return eager.eval(), scriptable.eval(), hp
 
@@ -168,7 +179,8 @@ def main():
     scripted = torch.jit.script(ExportedOC(scriptable).eval())
     scripted.save(args.output)
     print(f"wrote {args.output} (torch {torch.__version__}; dr_threshold={hp['dr_threshold']}, "
-          f"max_neighbors={hp.get('max_neighbors', 64)}, latent_dim={hp['latent_dim']})")
+          f"max_neighbors={hp.get('max_neighbors', 64)}, latent_dim={hp['latent_dim']}, "
+          f"normalize_embeddings={hp.get('normalize_embeddings', True)})")
 
     if args.validate_dir:
         loaded = torch.jit.load(args.output, map_location="cpu")
