@@ -704,6 +704,7 @@ def sim_probe_targets(
     phi = features[:, names.index("sim_phi")]
     return {
         "sim_eta": eta,
+        "abs(sim_eta)": np.abs(eta),
         "sim_phi": phi,
         "cos(sim_phi)": np.cos(phi),
         "sin(sim_phi)": np.sin(phi),
