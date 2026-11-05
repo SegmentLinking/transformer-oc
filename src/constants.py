@@ -14,7 +14,7 @@ BYTES_PER_GB = 1e9
 # Per-feature min/max used to normalize node features in PCDataset, by graph type.
 # Feature 0 (pT) is log-transformed before normalization.
 
-# LS graphs (data/ls_processing.py): 26 features
+# LS graphs (from the former data/ls_processing.py, not carried over to transformer-datasets): 26 features
 LS_FEATURE_MIN = [-1.02, -2.62, -3.15, -0.29, -0.92, -1.49, -1.60, -0.80,
                   -99.0, -99.0, -224.0, -99.0, -99.0, -225.0, -0.018, -0.82,
                   -5.03, -111.0, -111.0, -268.0, -111.0, -111.0, -268.0, -0.008,
@@ -24,7 +24,7 @@ LS_FEATURE_MAX = [7, 2.62, 3.15, 0.30, 0.92, 1.58, 1.64, 0.80,
                   5.03, 111.0, 111.0, 268.0, 111.0, 111.0, 268.0, 0.009,
                   0.92, 5.03]
 
-# T3 graphs (data/t3_processing.py): 49 features
+# T3 graphs (transformer_datasets.t3_processing in transformer-datasets): 49 features
 T3_FEATURE_MIN = [-3.4627, -2.4507, -3.1416, -0.2362, -0.7272, -0.8202, -0.8768, -0.5988,
                   -0.2704, -0.8894, -1.0590, -1.3935, -0.7862, -73.8012, -72.4212, -187.5750,
                   -73.8019, -77.1076, -187.8705, -0.0231, -0.5393, -5.0250, -93.8255, -93.9099,

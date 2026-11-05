@@ -1,21 +1,21 @@
 # Transformer OC
 
-# 1) Data processing
+# 1) Data
 
-Run one of the preprocessing scripts to create graph datasets (one graph per event). For example:
+Graph datasets (one graph per event) are made with [transformer-datasets](https://github.com/SegmentLinking/transformer-datasets), which documents the pipeline from simulation to graphs and the graph format. For example:
 
 ```
-python3 t3_processing.py --input ./CMSSW_15_1_0_pre2/src/RecoTracker/LSTCore/standalone/output_pu200_* --output pu200_t3/ -n 4
+python -m transformer_datasets.t3_processing --input LSTNtuple_*.root --output data/pu200_t3/ --seed 42 -n 16
 ```
 
-Each script will produce training and validation graph datasets (one file per event) in the script's configured output location.
+This writes `train/` and `val/` graph directories. Put them under `data/` and point `train_data_dir` and `val_data_dir` in the config at them.
 
 # 2) Training
 
 Train either locally or on the NRP cluster. Locally you can run the project's training entrypoint (see `src/main.py`). To run on NRP, use the deployment YAMLs under `misc/nrp/`.
 
 ```
-python3 main.py --config config.yaml
+python3 src/main.py --config config_pu200.yaml
 ```
 
 See config_pu200.yaml for example.
