@@ -16,14 +16,28 @@ import matplotlib.pyplot as plt
 import mplhep as hep
 hep.style.use(hep.style.CMS)
 
-from statsmodels.stats.proportion import proportion_confint
+from scipy.stats import beta as beta_distribution
 
 import sys
 sys.path.append('./src')
 
 from dataset import PCDataset
 from helpers import load_config
+from plot_embedding_distances import load_model
 from measures import calculate_tracking_metrics, run_inference_and_clustering, plot_cluster_size_histogram, plot_layer_span_histogram, plot_layer_span_2d
+
+
+def clopper_pearson_interval(k, n, alpha=0.05):
+    """
+    Clopper-Pearson interval for k successes in n trials. Same as statsmodels'
+    proportion_confint(k, n, alpha, method="beta"), which isn't in the image.
+    """
+    k = np.asarray(k, dtype=float)
+    n = np.asarray(n, dtype=float)
+    with np.errstate(invalid="ignore"):
+        low = np.where(k > 0, beta_distribution.ppf(alpha / 2, k, n - k + 1), 0.0)
+        high = np.where(k < n, beta_distribution.isf(alpha / 2, k + 1, n - k), 1.0)
+    return low, high
 
 
 def load_t5_data(root_file_pattern, max_events=None):
@@ -253,7 +267,7 @@ def calculate_t5_metrics(t5_data, pt_bins, eta_bins, eta_cut=None, purity_thresh
         _k = np.where(valid, k, 0)
         _N = np.where(valid, N, 1)
         eff = np.where(valid, _k / _N, 0)
-        low, high = proportion_confint(_k, _N, method="beta")
+        low, high = clopper_pearson_interval(_k, _N)
         low = np.where(valid, low, 0)
         high = np.where(valid, high, 0)
         err_low = eff - low
@@ -310,7 +324,7 @@ def plot_efficiency_fake_rate(pt_bins, eta_bins, metrics_pt, metrics_eta, output
         if ylim is not None:
             ax.set_ylim(ylim)
 
-        hep.cms.label(text="Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
+        hep.cms.label(label="Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
         ax.text(0.95, 0.95, r"$t\bar{t}$, $\langle\mu\rangle=200$", transform=ax.transAxes, fontsize=20, verticalalignment='top', horizontalalignment='right')
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -340,7 +354,7 @@ def plot_purity_duplicate(pt_bins, eta_bins, metrics_pt, metrics_eta, output_pat
         if ylim is not None:
             ax.set_ylim(ylim)
 
-        hep.cms.label(text="Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
+        hep.cms.label(label="Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
         ax.text(0.95, 0.95, r"$t\bar{t}$, $\langle\mu\rangle=200$", transform=ax.transAxes, fontsize=20, verticalalignment='top', horizontalalignment='right')
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -383,7 +397,7 @@ def plot_t5_comparison(pt_bins, eta_bins, model_metrics_pt, model_metrics_eta, t
         if ylim is not None:
             ax.set_ylim(ylim)
 
-        hep.cms.label(text="Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
+        hep.cms.label(label="Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
         ax.text(0.95, 0.95, r"$t\bar{t}$, $\langle\mu\rangle=200$", transform=ax.transAxes, fontsize=20, verticalalignment='top', horizontalalignment='right')
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -399,6 +413,8 @@ def main():
     argparser.add_argument('--output', type=str, help='Path to the trained model file')
     argparser.add_argument('--epsilon', type=float, default=None, help='DBSCAN epsilon parameter (overrides config)')
     argparser.add_argument('--n-events', type=int, default=-1, help='Number of events to process (-1 for all)')
+    argparser.add_argument('--beta-threshold', type=str, default=None, help='Keep T3s with beta > threshold before clustering, or "none" for no cut (overrides config)')
+    argparser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='Device for inference, e.g. cuda, cuda:1 or cpu')
     argparser.add_argument('--t5', action='store_true', help='Include T5 comparison plots')
     argparser.add_argument('--t5-file', type=str, default="/home/users/aaarora/phys/tracking/lst/lstod/CMSSW_15_1_0_pre2/src/RecoTracker/LSTCore/standalone/output_pu200_all/*.root", help='Path or wildcard to ROOT file(s) with T5 data')
     args = argparser.parse_args()
@@ -414,26 +430,9 @@ def main():
 
     print(f"Loaded dataset with {len(dataset)} graphs")
 
-    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(args.device)
     use_fp16 = device.type == 'cuda'  # Only use FP16 on CUDA
     print(f"Using device: {device}, FP16: {use_fp16}")
-
-    num_node_features = dataset[0].num_node_features
-
-    if config.get('model_type', 'transformer') == 'transformer':
-        from model import TransformerOCModel
-        model = TransformerOCModel(
-            input_dim=num_node_features,
-            hidden_dim=config.get('hidden_dim', config.get('d_model', 128)),
-            num_layers=config['num_layers'],
-            num_heads=config['nhead'],
-            latent_dim=config['latent_dim'],
-            dropout=config.get('dropout', 0.1),
-            dr_threshold=config.get('dr_threshold', 0.2),
-            attention_chunk_size=config.get('attention_chunk_size', 1024)
-        )
-
-    model.to(device)
 
     if ".pt" in args.output:
         output = args.output
@@ -447,23 +446,22 @@ def main():
 
     print(f"Loading model from: {output}")
 
-    checkpoint = torch.load(output, weights_only=False)
-
-    if 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
-    else:
-        state_dict = checkpoint
-
-    if any(key.startswith('model.') for key in state_dict.keys()):
-        state_dict = {key.replace('model.', '', 1): value for key, value in state_dict.items()}
-
-    model.load_state_dict(state_dict)
-
-    model.eval()
+    # Build the model from the hyperparameters saved in the checkpoint, not from the
+    # config, so settings like max_neighbors and normalize_embeddings match training
+    model, hparams = load_model(path=output, device=device)
+    print(
+        f"max_neighbors={hparams['max_neighbors']} "
+        f"normalize_embeddings={hparams.get('normalize_embeddings', True)}"
+    )
 
     min_samples = config.get('dbscan_min_samples', 2)
     purity_threshold = config.get('purity_threshold', 0.75)
-    beta_threshold = config.get('beta_threshold', None)
+    if args.beta_threshold is None:
+        beta_threshold = config.get('beta_threshold', None)
+    elif args.beta_threshold.lower() == 'none':
+        beta_threshold = None
+    else:
+        beta_threshold = float(args.beta_threshold)
 
     pt_bins = np.linspace(
         config.get('pt_bins_start', 0.5),
@@ -553,7 +551,7 @@ def main():
         _k = np.where(valid, k, 0)
         _N = np.where(valid, N, 1)
         eff = np.where(valid, _k / _N, 0)
-        low, high = proportion_confint(_k, _N, method="beta")
+        low, high = clopper_pearson_interval(_k, _N)
         low = np.where(valid, low, 0)
         high = np.where(valid, high, 0)
         err_low = eff - low

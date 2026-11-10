@@ -481,7 +481,7 @@ def plot_performance_histograms(
             ax.set_ylim(ylim)
 
         hep.cms.label(
-            text="Preliminary",
+            label="Preliminary",
             data=False,
             rlabel=r"Phase-2 (14 TeV)",
             ax=ax,
@@ -518,7 +518,7 @@ def plot_cluster_size_histogram(
     ax.set_ylabel("Number of Clusters")
     ax.grid(True, alpha=0.3)
     hep.cms.label(
-        text="Preliminary",
+        label="Preliminary",
         data=False,
         rlabel=r"Phase-2 (14 TeV)",
         ax=ax,
@@ -558,7 +558,7 @@ def plot_cluster_size_histogram(
         ax.set_ylabel("Simulated track $p_T$ [GeV]")
         ax.grid(True, alpha=0.3, color="white", linewidth=0.5)
         hep.cms.label(
-            text="Preliminary",
+            label="Preliminary",
             data=False,
             rlabel=r"Phase-2 (14 TeV)",
             ax=ax,
@@ -598,7 +598,7 @@ def plot_layer_span_histogram(cluster_layer_spans, output_path, epsilon):
     ax.set_ylim(0, 0.7)
     ax.grid(True, alpha=0.3)
     hep.cms.label(
-        text="Preliminary",
+        label="Preliminary",
         data=False,
         rlabel=r"Phase-2 (14 TeV)",
         ax=ax,
@@ -656,7 +656,7 @@ def plot_layer_span_2d(
     ax.set_ylabel("Simulated track $p_T$ [GeV]")
     ax.grid(True, alpha=0.3, color="white", linewidth=0.5)
     hep.cms.label(
-        text="Preliminary",
+        label="Preliminary",
         data=False,
         rlabel=r"Phase-2 (14 TeV)",
         ax=ax,
