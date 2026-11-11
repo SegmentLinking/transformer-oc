@@ -3,6 +3,7 @@
 import argparse
 import os
 import json
+import time
 
 # Must be set before torch initializes CUDA. Masked events vary in size, and
 # expandable segments greatly reduce allocator fragmentation for them.
@@ -16,6 +17,7 @@ torch.set_float32_matmul_precision('medium')
 
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor, ModelSummary
 from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.profilers import SimpleProfiler
 from torch_geometric.loader import DataLoader
 
 from dataset import PCDataset
@@ -93,6 +95,8 @@ class PrintProgress(pl.Callback):
 
     def __init__(self):
         self.log_file = None
+        self.batch_start = None
+        self.epoch_start = None
 
     def on_fit_start(self, trainer, pl_module):
         if trainer.is_global_zero:
@@ -110,13 +114,27 @@ class PrintProgress(pl.Callback):
             self.log_file.write(line + "\n")
             self.log_file.flush()
 
+    def on_train_epoch_start(self, trainer, pl_module):
+        self.epoch_start = time.perf_counter()
+
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        self.batch_start = time.perf_counter()
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        # Wall time of the epoch, including validation in epochs where it runs
+        epoch_s = time.perf_counter() - self.epoch_start
+        timing = f"n_batches={trainer.num_training_batches} epoch_s={epoch_s:.1f}"
+        self.write(f"stage=epoch epoch={trainer.current_epoch} {timing}")
+
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         epoch = trainer.current_epoch
         n_batches = trainer.num_training_batches
         events = describe_events(batch)
         metrics = format_metrics(trainer.progress_bar_metrics)
+        batch_s = time.perf_counter() - self.batch_start
+        timing = f"batch_s={batch_s:.3f}"
         step = f"epoch={epoch} batch={batch_idx + 1} n_batches={n_batches}"
-        self.write(f"stage=train {step} {events} {metrics}")
+        self.write(f"stage=train {step} {events} {metrics} {timing}")
 
     def on_validation_end(self, trainer, pl_module):
         if trainer.sanity_checking:
@@ -192,6 +210,14 @@ class Trainer:
         num_gpus = len(self.config.get('gpus', [1])) if isinstance(self.config.get('gpus'), list) else self.config.get('gpus', 1)
         accelerator = 'gpu' if torch.cuda.is_available() and num_gpus > 0 else 'cpu'
 
+        # Optional timing report, written to fit-profile.txt in the run's directory
+        if self.config['profiler'] is None:
+            profiler = None
+        elif self.config['profiler'] == 'simple':
+            profiler = SimpleProfiler(filename='profile')
+        else:
+            raise ValueError(f"Unknown profiler: {self.config['profiler']}")
+
         trainer = pl.Trainer(
             max_epochs=self.config['epochs'],
             callbacks=callbacks,
@@ -207,6 +233,7 @@ class Trainer:
             gradient_clip_algorithm=self.config.get('gradient_clip_algorithm', 'norm'),
             accumulate_grad_batches=self.config.get('accumulate_grad_batches', 1),
             precision=self.config.get('precision', 32),
+            profiler=profiler,
         )
 
         ckpt_path = None
