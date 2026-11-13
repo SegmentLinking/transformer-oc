@@ -172,11 +172,8 @@ def main() -> None:
         for tree_entry in range(tree.num_entries):
             mds, sims = read_event(tree=tree, tree_entry=tree_entry)
             check_lst_estimates(mds=mds, tree_entry=tree_entry)
-            geometry = layer_geometry(mds=mds)
             for i_md in pick_mds(mds=mds, sims=sims, rng=rng, n=args.n_mds - n_done):
-                info, layer_records = study_md(
-                    mds=mds, sims=sims, geometry=geometry, i_md=i_md
-                )
+                info, layer_records = study_md(mds=mds, sims=sims, i_md=i_md)
                 path = os.path.join(args.output, f"md_{n_done:03d}.pdf")
                 plot_md(
                     mds=mds,
@@ -299,23 +296,6 @@ def check_lst_estimates(
     )
 
 
-def layer_geometry(mds: dict[str, np.ndarray]) -> dict[int, dict[str, float]]:
-    """Extent of each layer in this event, from its MDs' anchor hits."""
-    geometry = {}
-    for layer in LAYERS:
-        on_layer = (mds["md_layer"] == layer) & ~mds["md_isPLS"]
-        rt = mds["md_anchor_rt"][on_layer]
-        abs_z = np.abs(mds["md_anchor_z"][on_layer])
-        geometry[layer] = {
-            "rt_median": np.median(rt),
-            "rt_min": rt.min(),
-            "rt_max": rt.max(),
-            "abs_z_median": np.median(abs_z),
-            "abs_z_max": abs_z.max(),
-        }
-    return geometry
-
-
 def pick_mds(
     mds: dict[str, np.ndarray],
     sims: dict[str, np.ndarray],
@@ -379,7 +359,6 @@ def is_selected_sim(
 def study_md(
     mds: dict[str, np.ndarray],
     sims: dict[str, np.ndarray],
-    geometry: dict[int, dict[str, float]],
     i_md: int,
 ) -> tuple[dict, list[dict]]:
     """
@@ -417,7 +396,6 @@ def study_md(
         md_anchor_rt=info["md_anchor_rt"],
         md_anchor_z=info["md_anchor_z"],
         own_layer=info["md_layer"],
-        geometry=geometry,
     )
     print(
         f"[md] tree_entry={info['tree_entry']} i_md={i_md} md_layer={info['md_layer']} region={info['region']} "
@@ -440,7 +418,6 @@ def study_md(
         center_eta, center_phi = layer_centers(
             target_layer=target_layer,
             info=info,
-            geometry=geometry,
         )
         record = {
             "md_info": info,
@@ -450,7 +427,6 @@ def study_md(
                 target_layer=target_layer,
                 md_anchor_rt=info["md_anchor_rt"],
                 md_anchor_z=info["md_anchor_z"],
-                geometry=geometry,
             ),
             "n_md_on_layer": len(on_layer),
             "siblings": siblings_here,
@@ -492,7 +468,6 @@ def projected_layers(
     md_anchor_rt: float,
     md_anchor_z: float,
     own_layer: int,
-    geometry: dict[int, dict[str, float]],
 ) -> list[int]:
     """Layers a straight line in r-z from the origin through the MD crosses, within ROAD_MARGIN of their extent."""
     # Slope of the line in an r-z plot with r on the vertical axis: rt = abs_r_over_z * |z|
@@ -501,18 +476,18 @@ def projected_layers(
     for layer in LAYERS:
         if layer == own_layer:
             continue
-        g = geometry[layer]
+        geo = GEOMETRY[layer]
         if layer in BARREL_LAYERS:
             # |z| where the line reaches the layer's radius
-            z_at_crossing = g["rt_median"] / abs_r_over_z
-            crosses = z_at_crossing <= g["abs_z_max"] * (1 + ROAD_MARGIN)
+            z_at_crossing = geo["rt_median"] / abs_r_over_z
+            crosses = z_at_crossing <= geo["abs_z_max"] * (1 + ROAD_MARGIN)
         else:
             # rt where the line reaches the layer's |z|
-            r_at_crossing = abs_r_over_z * g["abs_z_median"]
+            r_at_crossing = abs_r_over_z * geo["abs_z_median"]
             crosses = (
-                g["rt_min"] * (1 - ROAD_MARGIN)
+                geo["rt_min"] * (1 - ROAD_MARGIN)
                 <= r_at_crossing
-                <= g["rt_max"] * (1 + ROAD_MARGIN)
+                <= geo["rt_max"] * (1 + ROAD_MARGIN)
             )
         if crosses:
             road_layers.append(layer)
@@ -522,7 +497,6 @@ def projected_layers(
 def layer_centers(
     target_layer: int,
     info: dict,
-    geometry: dict[int, dict[str, float]],
 ) -> tuple[dict[str, float], dict[str, float]]:
     """
     (center_eta, center_phi) of all DETAILED_CENTERS on the target layer, see the module docstring.
@@ -547,7 +521,6 @@ def layer_centers(
             vz=vz,
             sinh_eta=(info["md_anchor_z"] - vz) / md_path_length,
             info=info,
-            geometry=geometry,
         )
     center_eta["oracle"], center_phi["oracle"] = helix_center(
         target_layer=target_layer,
@@ -555,7 +528,6 @@ def layer_centers(
         vz=info["sim_vz"],
         sinh_eta=np.sinh(info["sim_eta"]),
         info=info,
-        geometry=geometry,
     )
     return center_eta, center_phi
 
@@ -566,7 +538,6 @@ def helix_center(
     vz: float,
     sinh_eta: float,
     info: dict,
-    geometry: dict[int, dict[str, float]],
 ) -> tuple[float, float]:
     """
     (eta, phi) where a helix from (0, 0, vz) with q/pT and eta reaches the target layer. eta is seen from the
@@ -578,7 +549,6 @@ def helix_center(
         vz=vz,
         sinh_eta=sinh_eta,
         md_anchor_z=info["md_anchor_z"],
-        geometry=geometry,
     )
     phi_shift = -(
         bend(rt=rt, qoverpt=qoverpt) - bend(rt=info["md_anchor_rt"], qoverpt=qoverpt)
@@ -590,15 +560,14 @@ def target_radius(
     target_layer: int,
     md_anchor_rt: float,
     md_anchor_z: float,
-    geometry: dict[int, dict[str, float]],
 ) -> float:
     """
     Radius at which a straight line in r-z from the origin through the MD reaches the target layer: barrel, the
     layer's median rt; endcap, the radius where the line reaches the layer's median |z|.
     """
     if target_layer in BARREL_LAYERS:
-        return geometry[target_layer]["rt_median"]
-    return md_anchor_rt * geometry[target_layer]["abs_z_median"] / abs(md_anchor_z)
+        return GEOMETRY[target_layer]["rt_median"]
+    return md_anchor_rt * GEOMETRY[target_layer]["abs_z_median"] / abs(md_anchor_z)
 
 
 def helix_crossing(
@@ -607,7 +576,6 @@ def helix_crossing(
     vz: float,
     sinh_eta: float,
     md_anchor_z: float,
-    geometry: dict[int, dict[str, float]],
 ) -> tuple[float, float]:
     """
     (rt, z) where a helix from (0, 0, vz) with q/pT and eta reaches the target layer: barrel, at the layer's
@@ -616,9 +584,9 @@ def helix_crossing(
     Along the helix, z = vz + s * sinh(eta), with s the path length in x-y (see path_length).
     """
     if target_layer in BARREL_LAYERS:
-        rt = geometry[target_layer]["rt_median"]
+        rt = GEOMETRY[target_layer]["rt_median"]
         return rt, vz + path_length(rt=rt, qoverpt=qoverpt) * sinh_eta
-    z = np.sign(md_anchor_z) * geometry[target_layer]["abs_z_median"]
+    z = np.sign(md_anchor_z) * GEOMETRY[target_layer]["abs_z_median"]
     s = (z - vz) / sinh_eta
     return radius_after(s=s, qoverpt=qoverpt), z
 
