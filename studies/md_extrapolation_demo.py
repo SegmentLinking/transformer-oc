@@ -187,6 +187,26 @@ class MDOfInterest:
     md_siblings: list[int]
 
 
+@dataclass
+class ExtrapolationToLayer:
+    """One MD of interest extrapolated to one layer: the centers, and how close each one is to a sibling there."""
+
+    md: MDOfInterest
+    layer: int
+    # Whether the straight line in r-z crosses the layer (else the layer is here only for a sibling on it)
+    in_road: bool
+    r_target: float
+    n_md_on_layer: int
+    # The MD of interest's siblings on this layer
+    siblings: list[int]
+    # Per center (all DETAILED_CENTERS)
+    center_eta: dict[str, float]
+    center_phi: dict[str, float]
+    # Per center: dR to the nearest sibling and k (see nearest_sibling_k), None without a sibling on the layer
+    dr: dict[str, float | None]
+    knn: dict[str, int | None]
+
+
 def main() -> None:
     args = parse_args()
     if args.dump_geometry:
@@ -201,20 +221,20 @@ def main() -> None:
 
     # Study every MD first, so the summary can be the first page
     studied = []
-    records = []
+    all_extraps = []
     for i_md in pick_mds(mds=mds, sims=sims, rng=rng, n_mds=args.n_mds):
-        md, layer_records = study_md(mds=mds, sims=sims, i_md=i_md)
-        studied.append((md, layer_records))
-        records.extend(layer_records)
-    log_summary(records=records, centers=centers)
+        md, extraps = study_md(mds=mds, sims=sims, i_md=i_md)
+        studied.append((md, extraps))
+        all_extraps.extend(extraps)
+    log_summary(extraps=all_extraps, centers=centers)
 
     with PdfPages(args.output) as pdf:
-        plot_summary(records=records, centers=centers, pdf=pdf)
-        for md, layer_records in studied:
+        plot_summary(extraps=all_extraps, centers=centers, pdf=pdf)
+        for md, extraps in studied:
             plot_md(
                 mds=mds,
                 md=md,
-                layer_records=layer_records,
+                extraps=extraps,
                 centers=centers,
                 pdf=pdf,
             )
@@ -398,13 +418,11 @@ def study_md(
     mds: dict[str, np.ndarray],
     sims: dict[str, np.ndarray],
     i_md: int,
-) -> tuple[MDOfInterest, list[dict]]:
+) -> tuple[MDOfInterest, list[ExtrapolationToLayer]]:
     """
     The five centers, and dR and k from each, on every layer for one MD of interest.
 
-    md: the MD of interest, its sim and its siblings. layer_records: one per layer, with the centers
-    (center_eta, center_phi), the layer's siblings and, per center, dr_<center> and k_<center> (None without a
-    sibling on the layer).
+    md: the MD of interest, its sim and its siblings. extraps: one per layer in the road or with a sibling.
     """
     simidx = mds["md_simIdx"][i_md]
     siblings = []
@@ -445,7 +463,7 @@ def study_md(
 
     sibling_layers = {mds["md_layer"][i_sibling] for i_sibling in siblings}
     sibling_layers -= {md.md_layer}
-    layer_records = []
+    extraps = []
     for target_layer in sorted(set(road_layers) | sibling_layers):
         on_layer = np.flatnonzero((mds["md_layer"] == target_layer) & ~mds["md_isPLS"])
         siblings_here = [
@@ -457,35 +475,37 @@ def study_md(
             target_layer=target_layer,
             md=md,
         )
-        record = {
-            "md_info": md,
-            "layer": target_layer,
-            "in_road": target_layer in road_layers,
-            "r_target": target_radius(
+        extrap = ExtrapolationToLayer(
+            md=md,
+            layer=target_layer,
+            in_road=target_layer in road_layers,
+            r_target=target_radius(
                 target_layer=target_layer,
                 md_anchor_rt=md.md_anchor_rt,
                 md_anchor_z=md.md_anchor_z,
             ),
-            "n_md_on_layer": len(on_layer),
-            "siblings": siblings_here,
-            "center_eta": center_eta,
-            "center_phi": center_phi,
-        }
+            n_md_on_layer=len(on_layer),
+            siblings=siblings_here,
+            center_eta=center_eta,
+            center_phi=center_phi,
+            dr={},
+            knn={},
+        )
         for name in DETAILED_CENTERS:
             if len(siblings_here) == 0:
-                record[f"dr_{name}"] = None
-                record[f"k_{name}"] = None
+                extrap.dr[name] = None
+                extrap.knn[name] = None
                 continue
-            record[f"dr_{name}"], record[f"k_{name}"] = nearest_sibling_k(
+            extrap.dr[name], extrap.knn[name] = nearest_sibling_k(
                 center_eta=center_eta[name],
                 center_phi=center_phi[name],
                 mds=mds,
                 siblings=siblings_here,
                 on_layer=on_layer,
             )
-        log_layer(record=record)
-        layer_records.append(record)
-    return md, layer_records
+        log_layer(extrap=extrap)
+        extraps.append(extrap)
+    return md, extraps
 
 
 def region(
@@ -696,21 +716,21 @@ def nearest_sibling_k(
     return radius, int(np.sum(dr_all <= radius))
 
 
-def log_layer(record: dict) -> None:
+def log_layer(extrap: ExtrapolationToLayer) -> None:
     """One [layer] line: per center, its shift from the MD (dphi, deta), dR to the nearest sibling and k."""
-    md = record["md_info"]
+    md = extrap.md
     fields = []
     for name in DETAILED_CENTERS:
-        dphi = wrap_phi(phi=record["center_phi"][name] - md.md_phi)
-        deta = record["center_eta"][name] - md.md_eta
+        dphi = wrap_phi(phi=extrap.center_phi[name] - md.md_phi)
+        deta = extrap.center_eta[name] - md.md_eta
         fields.append(
             f"dphi_{name}={dphi:+.4f} deta_{name}={deta:+.4f} "
-            f"dr_{name}={fmt(value=record[f'dr_{name}'])} k_{name}={record[f'k_{name}']}"
+            f"dr_{name}={fmt(value=extrap.dr[name])} k_{name}={extrap.knn[name]}"
         )
     print(
         f"[layer] tree_entry={md.tree_entry} i_md={md.i_md} md_layer={md.md_layer} "
-        f"layer={record['layer']} in_road={record['in_road']} r_target={record['r_target']:.1f} "
-        f"n_md_on_layer={record['n_md_on_layer']} n_siblings={len(record['siblings'])} "
+        f"layer={extrap.layer} in_road={extrap.in_road} r_target={extrap.r_target:.1f} "
+        f"n_md_on_layer={extrap.n_md_on_layer} n_siblings={len(extrap.siblings)} "
         + " ".join(fields)
     )
 
@@ -736,12 +756,12 @@ def fmt(value: float | None) -> str:
 def plot_md(
     mds: dict[str, np.ndarray],
     md: MDOfInterest,
-    layer_records: list[dict],
+    extraps: list[ExtrapolationToLayer],
     centers: list[str],
     pdf: PdfPages,
 ) -> None:
     """One page per MD of interest: the x-y view, then one panel per layer."""
-    n_panels = 1 + len(layer_records)
+    n_panels = 1 + len(extraps)
     n_cols = 4
     n_rows = (n_panels + n_cols - 1) // n_cols
     fig, axs = plt.subplots(
@@ -749,8 +769,8 @@ def plot_md(
     )
     axs = axs.ravel()
     plot_transverse(ax=axs[0], mds=mds, md=md)
-    for ax, record in zip(axs[1:], layer_records):
-        plot_layer(ax=ax, mds=mds, md=md, record=record, centers=centers)
+    for ax, extrap in zip(axs[1:], extraps):
+        plot_layer(ax=ax, mds=mds, md=md, extrap=extrap, centers=centers)
     for ax in axs[n_panels:]:
         ax.axis("off")
     axs[1].legend(fontsize="x-small", loc="upper left")
@@ -825,7 +845,7 @@ def plot_layer(
     ax: plt.Axes,
     mds: dict[str, np.ndarray],
     md: MDOfInterest,
-    record: dict,
+    extrap: ExtrapolationToLayer,
     centers: list[str],
 ) -> None:
     """MDs of one layer in (phi, eta), with the centers and the circles reaching the nearest sibling."""
@@ -833,24 +853,22 @@ def plot_layer(
     # its axis may then run slightly beyond ±pi
     center_x = {}
     for name in centers:
-        center_x[name] = md.md_phi + wrap_phi(
-            phi=record["center_phi"][name] - md.md_phi
-        )
+        center_x[name] = md.md_phi + wrap_phi(phi=extrap.center_phi[name] - md.md_phi)
     sibling_x = []
     sibling_y = []
-    for i_sibling in record["siblings"]:
+    for i_sibling in extrap.siblings:
         sibling_x.append(md.md_phi + wrap_phi(phi=mds["md_phi"][i_sibling] - md.md_phi))
         sibling_y.append(mds["md_eta"][i_sibling])
 
     # A square window around the centers, siblings and circles
     xs = list(center_x.values()) + sibling_x
-    ys = [record["center_eta"][name] for name in centers] + sibling_y
-    radii = [record[f"dr_{name}"] or 0.0 for name in centers]
+    ys = [extrap.center_eta[name] for name in centers] + sibling_y
+    radii = [extrap.dr[name] or 0.0 for name in centers]
     middle_x = 0.5 * (min(xs) + max(xs))
     middle_y = 0.5 * (min(ys) + max(ys))
     half = 0.5 * max(max(xs) - min(xs), max(ys) - min(ys)) + max(radii) + WINDOW
 
-    on_layer = (mds["md_layer"] == record["layer"]) & ~mds["md_isPLS"]
+    on_layer = (mds["md_layer"] == extrap.layer) & ~mds["md_isPLS"]
     bkg_x = md.md_phi + wrap_phi(phi=mds["md_phi"][on_layer] - md.md_phi)
     bkg_y = mds["md_eta"][on_layer]
     in_window = (np.abs(bkg_x - middle_x) < half) & (np.abs(bkg_y - middle_y) < half)
@@ -872,7 +890,7 @@ def plot_layer(
         label="siblings",
     )
     for name in centers:
-        center = (center_x[name], record["center_eta"][name])
+        center = (center_x[name], extrap.center_eta[name])
         ax.scatter(
             *center,
             s=60,
@@ -881,11 +899,11 @@ def plot_layer(
             zorder=4,
             label=f"center, {CENTER_LABELS[name]}",
         )
-        if record[f"dr_{name}"] is not None:
+        if extrap.dr[name] is not None:
             ax.add_patch(
                 plt.Circle(
                     center,
-                    record[f"dr_{name}"],
+                    extrap.dr[name],
                     fill=False,
                     color=COLORS[name],
                     linestyle=LINESTYLES[name],
@@ -899,46 +917,46 @@ def plot_layer(
     ax.set_ylabel(r"$\eta$")
     ax.grid(alpha=0.3)
 
-    where = "barrel" if record["layer"] in BARREL_LAYERS else "endcap"
-    road = "" if record["in_road"] else ", not in road"
-    if len(record["siblings"]) == 0:
+    where = "barrel" if extrap.layer in BARREL_LAYERS else "endcap"
+    road = "" if extrap.in_road else ", not in road"
+    if len(extrap.siblings) == 0:
         result = "no sibling"
     else:
         k_per_center = []
         for name in centers:
-            k_per_center.append(f"{CENTER_LABELS[name]} {record[f'k_{name}']}")
+            k_per_center.append(f"{CENTER_LABELS[name]} {extrap.knn[name]}")
         result = "k: " + ", ".join(k_per_center)
-    helix_dphi = wrap_phi(phi=record["center_phi"]["helix"] - md.md_phi)
-    helix_deta = record["center_eta"]["helix"] - md.md_eta
+    helix_dphi = wrap_phi(phi=extrap.center_phi["helix"] - md.md_phi)
+    helix_deta = extrap.center_eta["helix"] - md.md_eta
     ax.set_title(
-        f"Layer {record['layer']} ({where}{road})\n{result}\n"
-        f"r = {record['r_target']:.0f} cm, helix dphi {helix_dphi:+.3f} deta {helix_deta:+.3f}",
+        f"Layer {extrap.layer} ({where}{road})\n{result}\n"
+        f"r = {extrap.r_target:.0f} cm, helix dphi {helix_dphi:+.3f} deta {helix_deta:+.3f}",
         fontsize=10,
     )
 
 
 def log_summary(
-    records: list[dict],
+    extraps: list[ExtrapolationToLayer],
     centers: list[str],
 ) -> None:
     """
     Median and 90% quantile of k per center, and how often each COMPARISONS center beats its reference (when both
     are in centers), per region of the MD of interest, per sim pT bin and overall.
     """
-    with_sibling = [rec for rec in records if len(rec["siblings"]) > 0]
+    with_sibling = [extrap for extrap in extraps if len(extrap.siblings) > 0]
     groups = []
     for name in REGIONS:
         groups.append(
             (
                 f"region={name}",
-                [rec for rec in with_sibling if rec["md_info"].md_region == name],
+                [extrap for extrap in with_sibling if extrap.md.md_region == name],
             )
         )
     for low, high in PT_BINS:
         groups.append(
             (
                 f"sim_pt={low}-{high}",
-                [rec for rec in with_sibling if low <= rec["md_info"].sim_pt < high],
+                [extrap for extrap in with_sibling if low <= extrap.md.sim_pt < high],
             )
         )
     groups.append(("all", with_sibling))
@@ -948,7 +966,7 @@ def log_summary(
             continue
         fields = []
         for name in centers:
-            knn = [rec[f"k_{name}"] for rec in group]
+            knn = [extrap.knn[name] for extrap in group]
             fields.append(
                 f"k_{name}_median={np.median(knn):.0f} k_{name}_q90={np.quantile(knn, 0.9):.0f}"
             )
@@ -956,10 +974,10 @@ def log_summary(
             if name not in centers or reference not in centers:
                 continue
             n_better = sum(
-                1 for rec in group if rec[f"k_{name}"] < rec[f"k_{reference}"]
+                1 for extrap in group if extrap.knn[name] < extrap.knn[reference]
             )
             n_worse = sum(
-                1 for rec in group if rec[f"k_{name}"] > rec[f"k_{reference}"]
+                1 for extrap in group if extrap.knn[name] > extrap.knn[reference]
             )
             fields.append(
                 f"n_{name}_better_than_{reference}={n_better} "
@@ -969,17 +987,17 @@ def log_summary(
 
 
 def plot_summary(
-    records: list[dict],
+    extraps: list[ExtrapolationToLayer],
     centers: list[str],
     pdf: PdfPages,
 ) -> None:
     """The summary page: k and dR to the nearest sibling per center, and k vs own."""
-    with_sibling = [rec for rec in records if len(rec["siblings"]) > 0]
+    with_sibling = [extrap for extrap in extraps if len(extrap.siblings) > 0]
     fig, axs = plt.subplots(nrows=1, ncols=3, figsize=(15, 4.6))
     for name in centers:
         label = CENTER_LABELS[name]
         axs[0].hist(
-            [rec[f"k_{name}"] for rec in with_sibling],
+            [extrap.knn[name] for extrap in with_sibling],
             bins=K_BINS,
             histtype="step",
             linewidth=2,
@@ -988,7 +1006,7 @@ def plot_summary(
             label=label,
         )
         axs[1].hist(
-            [max(rec[f"dr_{name}"], DR_BINS[0]) for rec in with_sibling],
+            [max(extrap.dr[name], DR_BINS[0]) for extrap in with_sibling],
             bins=DR_BINS,
             histtype="step",
             linewidth=2,
@@ -1008,8 +1026,8 @@ def plot_summary(
         if name == "own":
             continue
         axs[2].scatter(
-            [rec["k_own"] for rec in with_sibling],
-            [rec[f"k_{name}"] for rec in with_sibling],
+            [extrap.knn["own"] for extrap in with_sibling],
+            [extrap.knn[name] for extrap in with_sibling],
             s=10,
             color=COLORS[name],
             alpha=0.6,
@@ -1024,7 +1042,7 @@ def plot_summary(
     axs[2].set_title("Below the diagonal: the shift helps", fontsize=10)
     axs[2].grid(alpha=0.3)
 
-    n_mds = len({(rec["md_info"].tree_entry, rec["md_info"].i_md) for rec in records})
+    n_mds = len({(extrap.md.tree_entry, extrap.md.i_md) for extrap in extraps})
     fig.suptitle(
         f"pT-extrapolated vs plain (eta, phi) neighbourhood: {n_mds} MDs of interest, "
         f"{len(with_sibling)} (MD, layer) pairs with a sibling",
