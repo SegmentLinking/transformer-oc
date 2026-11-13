@@ -167,8 +167,8 @@ def main() -> None:
     centers = DETAILED_CENTERS if args.detailed else SALIENT_CENTERS
     records = []
     n_done = 0
-    with uproot.open(args.input) as f:
-        tree = f["tree"]
+    with uproot.open(args.input) as root_file:
+        tree = root_file["tree"]
         for tree_entry in range(tree.num_entries):
             mds, sims = read_event(tree=tree, tree_entry=tree_entry)
             check_lst_estimates(mds=mds, tree_entry=tree_entry)
@@ -217,8 +217,8 @@ def dump_geometry(input_path: str) -> None:
     """
     rt_on_layer = {layer: [] for layer in LAYERS}
     abs_z_on_layer = {layer: [] for layer in LAYERS}
-    with uproot.open(input_path) as f:
-        tree = f["tree"]
+    with uproot.open(input_path) as root_file:
+        tree = root_file["tree"]
         n_events = tree.num_entries
         for tree_entry in range(n_events):
             mds, _ = read_event(tree=tree, tree_entry=tree_entry)
@@ -543,7 +543,7 @@ def helix_center(
     (eta, phi) where a helix from (0, 0, vz) with q/pT and eta reaches the target layer. eta is seen from the
     origin, as md_eta; phi is the MD's, moved by the bend from the MD's radius to the layer's radius.
     """
-    rt, z = helix_crossing(
+    helix_rt, helix_z = helix_crossing(
         target_layer=target_layer,
         qoverpt=qoverpt,
         vz=vz,
@@ -551,9 +551,10 @@ def helix_center(
         md_anchor_z=info["md_anchor_z"],
     )
     phi_shift = -(
-        bend(rt=rt, qoverpt=qoverpt) - bend(rt=info["md_anchor_rt"], qoverpt=qoverpt)
+        bend(rt=helix_rt, qoverpt=qoverpt)
+        - bend(rt=info["md_anchor_rt"], qoverpt=qoverpt)
     )
-    return np.arcsinh(z / rt), wrap_phi(phi=info["md_phi"] + phi_shift)
+    return np.arcsinh(helix_z / helix_rt), wrap_phi(phi=info["md_phi"] + phi_shift)
 
 
 def target_radius(
@@ -586,9 +587,9 @@ def helix_crossing(
     if target_layer in BARREL_LAYERS:
         rt = GEOMETRY[target_layer]["rt_median"]
         return rt, vz + path_length(rt=rt, qoverpt=qoverpt) * sinh_eta
-    z = np.sign(md_anchor_z) * GEOMETRY[target_layer]["abs_z_median"]
-    s = (z - vz) / sinh_eta
-    return radius_after(s=s, qoverpt=qoverpt), z
+    helix_z = np.sign(md_anchor_z) * GEOMETRY[target_layer]["abs_z_median"]
+    helix_s = (helix_z - vz) / sinh_eta
+    return radius_after(helix_s=helix_s, qoverpt=qoverpt), helix_z
 
 
 def path_length(
@@ -606,14 +607,17 @@ def path_length(
 
 
 def radius_after(
-    s: float,
+    helix_s: float,
     qoverpt: float,
 ) -> float:
-    """Radius reached after path length s in x-y, the inverse of path_length: rt = 2R * sin(s / 2R)."""
+    """
+    Radius reached after path length helix_s in x-y, the inverse of path_length: rt = 2R * sin(s / 2R), with s =
+    helix_s.
+    """
     curvature = K2RINV_1GEV * abs(qoverpt)
     if curvature == 0:
-        return s
-    return np.sin(curvature * s) / curvature
+        return helix_s
+    return np.sin(curvature * helix_s) / curvature
 
 
 def bend(
@@ -816,12 +820,12 @@ def plot_layer(
     half = 0.5 * max(max(xs) - min(xs), max(ys) - min(ys)) + max(radii) + WINDOW
 
     on_layer = (mds["md_layer"] == record["layer"]) & ~mds["md_isPLS"]
-    x = info["md_phi"] + wrap_phi(phi=mds["md_phi"][on_layer] - info["md_phi"])
-    y = mds["md_eta"][on_layer]
-    in_window = (np.abs(x - middle_x) < half) & (np.abs(y - middle_y) < half)
+    bkg_x = info["md_phi"] + wrap_phi(phi=mds["md_phi"][on_layer] - info["md_phi"])
+    bkg_y = mds["md_eta"][on_layer]
+    in_window = (np.abs(bkg_x - middle_x) < half) & (np.abs(bkg_y - middle_y) < half)
     ax.scatter(
-        x[in_window],
-        y[in_window],
+        bkg_x[in_window],
+        bkg_y[in_window],
         s=3,
         color=BACKGROUND_COLOR,
         rasterized=True,
@@ -890,20 +894,20 @@ def log_summary(
     Median and 90% quantile of k per center, and how often each COMPARISONS center beats its reference (when both
     are in centers), per region of the MD of interest, per sim pT bin and overall.
     """
-    with_sibling = [r for r in records if len(r["siblings"]) > 0]
+    with_sibling = [rec for rec in records if len(rec["siblings"]) > 0]
     groups = []
     for name in REGIONS:
         groups.append(
             (
                 f"region={name}",
-                [r for r in with_sibling if r["md_info"]["region"] == name],
+                [rec for rec in with_sibling if rec["md_info"]["region"] == name],
             )
         )
     for low, high in PT_BINS:
         groups.append(
             (
                 f"sim_pt={low}-{high}",
-                [r for r in with_sibling if low <= r["md_info"]["sim_pt"] < high],
+                [rec for rec in with_sibling if low <= rec["md_info"]["sim_pt"] < high],
             )
         )
     groups.append(("all", with_sibling))
@@ -913,15 +917,19 @@ def log_summary(
             continue
         fields = []
         for name in centers:
-            k = [r[f"k_{name}"] for r in group]
+            knn = [rec[f"k_{name}"] for rec in group]
             fields.append(
-                f"k_{name}_median={np.median(k):.0f} k_{name}_q90={np.quantile(k, 0.9):.0f}"
+                f"k_{name}_median={np.median(knn):.0f} k_{name}_q90={np.quantile(knn, 0.9):.0f}"
             )
         for name, reference in COMPARISONS:
             if name not in centers or reference not in centers:
                 continue
-            n_better = sum(1 for r in group if r[f"k_{name}"] < r[f"k_{reference}"])
-            n_worse = sum(1 for r in group if r[f"k_{name}"] > r[f"k_{reference}"])
+            n_better = sum(
+                1 for rec in group if rec[f"k_{name}"] < rec[f"k_{reference}"]
+            )
+            n_worse = sum(
+                1 for rec in group if rec[f"k_{name}"] > rec[f"k_{reference}"]
+            )
             fields.append(
                 f"n_{name}_better_than_{reference}={n_better} "
                 f"n_{name}_worse_than_{reference}={n_worse}"
@@ -934,12 +942,12 @@ def plot_summary(
     centers: list[str],
     output: str,
 ) -> None:
-    with_sibling = [r for r in records if len(r["siblings"]) > 0]
+    with_sibling = [rec for rec in records if len(rec["siblings"]) > 0]
     fig, axs = plt.subplots(nrows=1, ncols=3, figsize=(15, 4.6))
     for name in centers:
         label = CENTER_LABELS[name]
         axs[0].hist(
-            [r[f"k_{name}"] for r in with_sibling],
+            [rec[f"k_{name}"] for rec in with_sibling],
             bins=K_BINS,
             histtype="step",
             linewidth=2,
@@ -948,7 +956,7 @@ def plot_summary(
             label=label,
         )
         axs[1].hist(
-            [max(r[f"dr_{name}"], DR_BINS[0]) for r in with_sibling],
+            [max(rec[f"dr_{name}"], DR_BINS[0]) for rec in with_sibling],
             bins=DR_BINS,
             histtype="step",
             linewidth=2,
@@ -968,8 +976,8 @@ def plot_summary(
         if name == "own":
             continue
         axs[2].scatter(
-            [r["k_own"] for r in with_sibling],
-            [r[f"k_{name}"] for r in with_sibling],
+            [rec["k_own"] for rec in with_sibling],
+            [rec[f"k_{name}"] for rec in with_sibling],
             s=10,
             color=COLORS[name],
             alpha=0.6,
@@ -984,7 +992,9 @@ def plot_summary(
     axs[2].set_title("Below the diagonal: the shift helps", fontsize=10)
     axs[2].grid(alpha=0.3)
 
-    n_mds = len({(r["md_info"]["tree_entry"], r["md_info"]["i_md"]) for r in records})
+    n_mds = len(
+        {(rec["md_info"]["tree_entry"], rec["md_info"]["i_md"]) for rec in records}
+    )
     fig.suptitle(
         f"pT-extrapolated vs plain (eta, phi) neighbourhood: {n_mds} MDs of interest, "
         f"{len(with_sibling)} (MD, layer) pairs with a sibling",
