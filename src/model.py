@@ -6,6 +6,7 @@ from torch.optim.lr_scheduler import MultiStepLR
 
 from constants import BYTES_PER_GB
 from utils.object_condensation import ObjectCondensation
+from utils.hit_targets import hit_targets
 from utils.torch_geometric_interface import row_splits_from_strict_batch as batch_to_rowsplits
 
 import pytorch_lightning as pl
@@ -261,6 +262,11 @@ class TransformerLightningModule(pl.LightningModule):
             'oc_q_min': config.get('oc_q_min', 0.1),
             'oc_s_B': config.get('oc_s_B', 1.0),
             'oc_repulsive_chunk_size': config.get('oc_repulsive_chunk_size', 32),
+
+            # Put the hit fraction into the loss instead of a real/fake cut: every T3 with a hit on a sim
+            # track belongs to its best sim track with fraction f = matched hits / 6 (from hit_id and
+            # hit_sim_candidates), and the OC loss uses f continuously. False: sim_index targets (standard OC).
+            'hit_fraction_loss': config.get('hit_fraction_loss', False),
             
             'epochs': config.get('epochs', 100),
             'gradient_clip_val': config.get('gradient_clip_val', 1.0),
@@ -293,10 +299,22 @@ class TransformerLightningModule(pl.LightningModule):
             s_B=self.hparams.oc_s_B,
             repulsive_chunk_size=self.hparams.oc_repulsive_chunk_size,
         )
+
+    def oc_targets(self, data):
+        """Association index (N, 1) for the OC loss, -1 for noise, and hit fractions (N, 1) or None."""
+        if not self.hparams.hit_fraction_loss:
+            asso_idx = data.sim_index.to(self.device).to(torch.int64)
+            asso_idx[asso_idx < 0] = -1
+            return asso_idx.unsqueeze(-1), None
+        if data.num_graphs != 1:
+            raise ValueError("hit_fraction_loss needs one event per batch (PyG does not offset hit_id across graphs)")
+        # min_matched_hits=1: every T3 with a matched hit has a target; fraction 0 exactly for noise
+        target, frac = hit_targets(data.hit_id.to(self.device), data.hit_sim_candidates.to(self.device), 1)
+        return target.unsqueeze(-1), frac.unsqueeze(-1)
     
     def training_step(self, data):
-        x, sim_index, batch = data.x.to(self.device), data.sim_index.to(self.device), data.batch.to(self.device)
-        sim_index[sim_index < 0] = -1
+        x, batch = data.x.to(self.device), data.batch.to(self.device)
+        asso_idx, fractions = self.oc_targets(data)
         row_splits = batch_to_rowsplits(batch)
         
         model_out = self.model(x, batch)
@@ -306,8 +324,9 @@ class TransformerLightningModule(pl.LightningModule):
         L_att, L_rep, L_beta, _, _ = self.criterion(
             beta=beta,
             coords=coords,
-            asso_idx = sim_index.unsqueeze(-1).to(torch.int64),
-            row_splits = row_splits
+            asso_idx = asso_idx,
+            row_splits = row_splits,
+            fractions = fractions,
         )
         
         tot_loss_batch = (self.hparams.loss_weight_attractive * L_att + 
@@ -333,8 +352,8 @@ class TransformerLightningModule(pl.LightningModule):
         return tot_loss_batch
 
     def validation_step(self, data):
-        x, sim_index, batch = data.x.to(self.device), data.sim_index.to(self.device), data.batch.to(self.device)
-        sim_index[sim_index < 0] = -1
+        x, batch = data.x.to(self.device), data.batch.to(self.device)
+        asso_idx, fractions = self.oc_targets(data)
         row_splits = batch_to_rowsplits(batch)
 
         model_out = self.model(x, batch)
@@ -344,8 +363,9 @@ class TransformerLightningModule(pl.LightningModule):
         L_att, L_rep, L_beta, _, _ = self.criterion(
             beta=beta,
             coords=coords,
-            asso_idx = sim_index.unsqueeze(-1).to(torch.int64),
-            row_splits = row_splits
+            asso_idx = asso_idx,
+            row_splits = row_splits,
+            fractions = fractions,
         )
         
         tot_loss_batch = (self.hparams.loss_weight_attractive * L_att + 

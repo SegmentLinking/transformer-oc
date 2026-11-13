@@ -237,14 +237,15 @@ class ObjectCondensation(torch.nn.Module):
         x_a = x_a + self.weighted_obj_coordinates * torch.mean(x_k_m, dim=1)
         return x_a.view(-1, 1, x.size(1))
     
-    def _attractive_potential(self, beta_scale, beta_scale_k, coords_k, coords_k_m, M):
+    def _attractive_potential(self, beta_scale, beta_scale_k, coords_k, coords_k_m, M, fractions=None):
         '''
         returns the attractive potential loss for each object. # K x 1
         Memory-optimized version.
+        With fractions (N x 1), the potential is a fraction-weighted mean over the points of each object.
         '''
         beta_scale_k_m = select_with_default(M, beta_scale, 0.) # K x M x 1
-        # mask
-        mask_k_m = select_with_default(M, torch.ones_like(beta_scale), 0.) # K x M x 1
+        # mask (holds the fractions, if given; 0 for padding)
+        mask_k_m = select_with_default(M, torch.ones_like(beta_scale) if fractions is None else fractions, 0.) # K x M x 1
         
         ## Attractive potential
         # get the distances - compute in-place where possible
@@ -449,16 +450,16 @@ class ObjectCondensation(torch.nn.Module):
         return self._scatter_to_N_indices(pl_scaling_k_m, asso_idx, M) # N x 1
 
 
-    def _compute_potentials(self, beta_scale, beta_scale_k, coords, coords_k, coords_k_m, M, M_not):
+    def _compute_potentials(self, beta_scale, beta_scale_k, coords, coords_k, coords_k_m, M, M_not, fractions=None):
         '''
         Helper function for computing attractive and repulsive potentials.
         Can be used with gradient checkpointing.
         '''
-        L_V_k = self._attractive_potential(beta_scale, beta_scale_k, coords_k, coords_k_m, M)
+        L_V_k = self._attractive_potential(beta_scale, beta_scale_k, coords_k, coords_k_m, M, fractions)
         L_rep_k = self._repulsive_potential(beta_scale, beta_scale_k, coords, coords_k, M_not)
         return L_V_k, L_rep_k
 
-    def forward(self, beta, coords, asso_idx, row_splits):
+    def forward(self, beta, coords, asso_idx, row_splits, fractions=None):
         '''
         Inputs:
             beta (torch.Tensor): The beta values for each object, shape (N, 1)
@@ -467,11 +468,20 @@ class ObjectCondensation(torch.nn.Module):
                                         By convention, noise is marked by and index of -1.
                                         All objects have indices >= 0.
             row_splits (torch.Tensor): The row splits tensor, shape (N_rs)
+            fractions (torch.Tensor, optional): Fraction in [0, 1] of each point that belongs to its
+                                        object, shape (N, 1), e.g. the fraction of a T3's hits on its sim track.
+                                        Must be 0 for noise points. Replaces the hard object/noise split:
+                                        - attractive potential: fraction-weighted mean over each object's points,
+                                        - beta loss: on fractions * beta, so an object condenses best on a pure point,
+                                        - noise term: s_B * (1 - fractions) * beta for every point.
+                                        Repulsion and the choice of condensation point are unchanged.
+                                        None: 1 for object points, 0 for noise (standard OC).
         '''
         #check inputs
         assert beta.dim() == 2 and beta.size(1) == 1
         assert coords.dim() == 2 and coords.size(1) >= 1
         assert asso_idx.dim() == 2 and asso_idx.size(1) == 1
+        assert fractions is None or fractions.shape == beta.shape
 
         asso_idx = asso_idx.squeeze(1)
 
@@ -492,7 +502,7 @@ class ObjectCondensation(torch.nn.Module):
 
         # Compute potentials with optional gradient checkpointing
         L_V_k, L_rep_k = self._compute_potentials(
-            beta_scale, beta_scale_k, coords, coords_k, coords_k_m, M, M_not
+            beta_scale, beta_scale_k, coords, coords_k, coords_k_m, M, M_not, fractions
         )
 
         # Use repeat_interleave to assign batch indices
@@ -513,11 +523,16 @@ class ObjectCondensation(torch.nn.Module):
         L_V_rep_N = self._scatter_to_N_indices(L_k_m, asso_idx, M).view(-1,1) # N x 1
 
         # create the beta loss
+        if fractions is not None:
+            beta_k_m = beta_k_m * select_with_default(M, fractions, 0.)
         L_b_k = self._beta_loss(beta_k_m) # K x 1
         L_b = torch.sum(L_b_k / K_k) # scalar
 
         # add noise term
-        L_noise = self.s_B *  beta * (asso_idx < 0).view(-1,1)  #norm per rs here too
+        if fractions is None:
+            L_noise = self.s_B *  beta * (asso_idx < 0).view(-1,1)  #norm per rs here too
+        else:
+            L_noise = self.s_B * beta * (1. - fractions)
         L_noise = torch.mean(self._mean_per_row_split(L_noise, row_splits))
 
         L_b = L_b + L_noise
