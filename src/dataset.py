@@ -7,8 +7,9 @@ from constants import LS_FEATURE_MIN, LS_FEATURE_MAX, T3_FEATURE_MIN, T3_FEATURE
 from constants import T3_ETA_COLUMN, T3_PHI_COLUMN, ETA_MIN, ETA_MAX, PHI_MIN, PHI_MAX
 
 # Graph fields with one row per T3, which are cut by the eta/phi mask.
-# sim_features (one row per sim particle) is deliberately not cut.
-PER_T3_FIELDS = ["x", "sim_index", "md_layer", "md_simIdx", "hit_layer", "hit_simIdx"]
+# sim_features (one row per sim particle) and hit_sim_candidates (one row per distinct hit,
+# indexed by hit_id) are deliberately not cut.
+PER_T3_FIELDS = ["x", "sim_index", "md_layer", "md_simIdx", "hit_layer", "hit_simIdx", "hit_id"]
 
 
 class PCDataset(Dataset):
