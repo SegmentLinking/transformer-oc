@@ -46,6 +46,7 @@ Usage (from the repo root):
 import os
 import random
 from argparse import ArgumentParser, Namespace
+from dataclasses import dataclass
 from pprint import pprint
 
 import awkward as ak
@@ -159,6 +160,33 @@ GEOMETRY = {
 }
 
 
+@dataclass
+class MDOfInterest:
+    """One MD we extrapolate from: its own estimates, its sim, and the other MDs of that sim."""
+
+    tree_entry: int
+    i_md: int
+    md_layer: int
+    # barrel_flat, barrel_tilted or endcap
+    md_region: str
+    # PS or 2S
+    md_module: str
+    md_anchor_rt: float
+    md_anchor_z: float
+    md_eta: float
+    md_phi: float
+    md_pt: float
+    # q/pT = -1 / md_pt, as in the module docstring
+    md_qoverpt: float
+    sim_qoverpt: float
+    sim_pt: float
+    sim_eta: float
+    sim_vz: float
+    sim_pdgId: int
+    # Indices of the sim's other (non-pLS) MDs, on any layer
+    md_siblings: list[int]
+
+
 def main() -> None:
     args = parse_args()
     if args.dump_geometry:
@@ -175,17 +203,17 @@ def main() -> None:
     studied = []
     records = []
     for i_md in pick_mds(mds=mds, sims=sims, rng=rng, n_mds=args.n_mds):
-        info, layer_records = study_md(mds=mds, sims=sims, i_md=i_md)
-        studied.append((info, layer_records))
+        md, layer_records = study_md(mds=mds, sims=sims, i_md=i_md)
+        studied.append((md, layer_records))
         records.extend(layer_records)
     log_summary(records=records, centers=centers)
 
     with PdfPages(args.output) as pdf:
         plot_summary(records=records, centers=centers, pdf=pdf)
-        for info, layer_records in studied:
+        for md, layer_records in studied:
             plot_md(
                 mds=mds,
-                info=info,
+                md=md,
                 layer_records=layer_records,
                 centers=centers,
                 pdf=pdf,
@@ -370,11 +398,11 @@ def study_md(
     mds: dict[str, np.ndarray],
     sims: dict[str, np.ndarray],
     i_md: int,
-) -> tuple[dict, list[dict]]:
+) -> tuple[MDOfInterest, list[dict]]:
     """
     The five centers, and dR and k from each, on every layer for one MD of interest.
 
-    info: the MD of interest, its sim and its siblings. layer_records: one per layer, with the centers
+    md: the MD of interest, its sim and its siblings. layer_records: one per layer, with the centers
     (center_eta, center_phi), the layer's siblings and, per center, dr_<center> and k_<center> (None without a
     sibling on the layer).
     """
@@ -383,40 +411,40 @@ def study_md(
     for i_sibling in np.flatnonzero(mds["md_simIdx"] == simidx):
         if i_sibling != i_md and not mds["md_isPLS"][i_sibling]:
             siblings.append(i_sibling)
-    info = {
-        "tree_entry": mds["tree_entry"],
-        "i_md": i_md,
-        "md_layer": mds["md_layer"][i_md],
-        "region": region(mds=mds, i_md=i_md),
-        "module": "PS" if mds["md_type"][i_md] == PS_TYPE else "2S",
-        "md_anchor_rt": mds["md_anchor_rt"][i_md],
-        "md_anchor_z": mds["md_anchor_z"][i_md],
-        "md_eta": mds["md_eta"][i_md],
-        "md_phi": mds["md_phi"][i_md],
-        "md_pt": mds["md_pt"][i_md],
-        "md_qoverpt": -1.0 / mds["md_pt"][i_md],
-        "sim_qoverpt": sims["sim_q"][simidx] / sims["sim_pt"][simidx],
-        "sim_pt": sims["sim_pt"][simidx],
-        "sim_eta": sims["sim_eta"][simidx],
-        "sim_vz": sims["sim_vz"][simidx],
-        "sim_pdgId": sims["sim_pdgId"][simidx],
-        "siblings": siblings,
-    }
+    md = MDOfInterest(
+        tree_entry=mds["tree_entry"],
+        i_md=i_md,
+        md_layer=mds["md_layer"][i_md],
+        md_region=region(mds=mds, i_md=i_md),
+        md_module="PS" if mds["md_type"][i_md] == PS_TYPE else "2S",
+        md_anchor_rt=mds["md_anchor_rt"][i_md],
+        md_anchor_z=mds["md_anchor_z"][i_md],
+        md_eta=mds["md_eta"][i_md],
+        md_phi=mds["md_phi"][i_md],
+        md_pt=mds["md_pt"][i_md],
+        md_qoverpt=-1.0 / mds["md_pt"][i_md],
+        sim_qoverpt=sims["sim_q"][simidx] / sims["sim_pt"][simidx],
+        sim_pt=sims["sim_pt"][simidx],
+        sim_eta=sims["sim_eta"][simidx],
+        sim_vz=sims["sim_vz"][simidx],
+        sim_pdgId=sims["sim_pdgId"][simidx],
+        md_siblings=siblings,
+    )
     road_layers = projected_layers(
-        md_anchor_rt=info["md_anchor_rt"],
-        md_anchor_z=info["md_anchor_z"],
-        own_layer=info["md_layer"],
+        md_anchor_rt=md.md_anchor_rt,
+        md_anchor_z=md.md_anchor_z,
+        own_layer=md.md_layer,
     )
     print(
-        f"[md] tree_entry={info['tree_entry']} i_md={i_md} md_layer={info['md_layer']} region={info['region']} "
-        f"module={info['module']} md_pt={info['md_pt']:.3f} md_qoverpt={info['md_qoverpt']:+.4f} "
-        f"sim_qoverpt={info['sim_qoverpt']:+.4f} sim_pt={info['sim_pt']:.3f} "
-        f"sim_eta={info['sim_eta']:+.3f} sim_vz={info['sim_vz']:+.2f} sim_pdgId={info['sim_pdgId']} "
+        f"[md] tree_entry={md.tree_entry} i_md={i_md} md_layer={md.md_layer} region={md.md_region} "
+        f"module={md.md_module} md_pt={md.md_pt:.3f} md_qoverpt={md.md_qoverpt:+.4f} "
+        f"sim_qoverpt={md.sim_qoverpt:+.4f} sim_pt={md.sim_pt:.3f} "
+        f"sim_eta={md.sim_eta:+.3f} sim_vz={md.sim_vz:+.2f} sim_pdgId={md.sim_pdgId} "
         f"n_siblings={len(siblings)} road_layers={','.join(str(layer) for layer in road_layers)}"
     )
 
     sibling_layers = {mds["md_layer"][i_sibling] for i_sibling in siblings}
-    sibling_layers -= {info["md_layer"]}
+    sibling_layers -= {md.md_layer}
     layer_records = []
     for target_layer in sorted(set(road_layers) | sibling_layers):
         on_layer = np.flatnonzero((mds["md_layer"] == target_layer) & ~mds["md_isPLS"])
@@ -427,16 +455,16 @@ def study_md(
         ]
         center_eta, center_phi = layer_centers(
             target_layer=target_layer,
-            info=info,
+            md=md,
         )
         record = {
-            "md_info": info,
+            "md_info": md,
             "layer": target_layer,
             "in_road": target_layer in road_layers,
             "r_target": target_radius(
                 target_layer=target_layer,
-                md_anchor_rt=info["md_anchor_rt"],
-                md_anchor_z=info["md_anchor_z"],
+                md_anchor_rt=md.md_anchor_rt,
+                md_anchor_z=md.md_anchor_z,
             ),
             "n_md_on_layer": len(on_layer),
             "siblings": siblings_here,
@@ -457,7 +485,7 @@ def study_md(
             )
         log_layer(record=record)
         layer_records.append(record)
-    return info, layer_records
+    return md, layer_records
 
 
 def region(
@@ -506,7 +534,7 @@ def projected_layers(
 
 def layer_centers(
     target_layer: int,
-    info: dict,
+    md: MDOfInterest,
 ) -> tuple[dict[str, float], dict[str, float]]:
     """
     (center_eta, center_phi) of all DETAILED_CENTERS on the target layer, see the module docstring.
@@ -514,30 +542,30 @@ def layer_centers(
     own stays at the MD's (eta, phi). The three helix centers follow a helix from (0, 0, vz) through the MD, each
     with its own q/pT and vz. The oracle follows the sim's helix from its vertex, with the sim's eta.
     """
-    center_eta = {"own": info["md_eta"]}
-    center_phi = {"own": info["md_phi"]}
+    center_eta = {"own": md.md_eta}
+    center_phi = {"own": md.md_phi}
     # Per helix center through the MD: (q/pT, vz)
     helix_inputs = {
-        "helix": (info["md_qoverpt"], 0.0),
-        "helix_sim_qoverpt": (info["sim_qoverpt"], 0.0),
-        "helix_sim_vz": (info["md_qoverpt"], info["sim_vz"]),
+        "helix": (md.md_qoverpt, 0.0),
+        "helix_sim_qoverpt": (md.sim_qoverpt, 0.0),
+        "helix_sim_vz": (md.md_qoverpt, md.sim_vz),
     }
     for name, (qoverpt, vz) in helix_inputs.items():
         # z = vz + s * sinh(eta) at the MD gives the helix's sinh(eta)
-        md_path_length = path_length(rt=info["md_anchor_rt"], qoverpt=qoverpt)
+        md_path_length = path_length(rt=md.md_anchor_rt, qoverpt=qoverpt)
         center_eta[name], center_phi[name] = helix_center(
             target_layer=target_layer,
             qoverpt=qoverpt,
             vz=vz,
-            sinh_eta=(info["md_anchor_z"] - vz) / md_path_length,
-            info=info,
+            sinh_eta=(md.md_anchor_z - vz) / md_path_length,
+            md=md,
         )
     center_eta["oracle"], center_phi["oracle"] = helix_center(
         target_layer=target_layer,
-        qoverpt=info["sim_qoverpt"],
-        vz=info["sim_vz"],
-        sinh_eta=np.sinh(info["sim_eta"]),
-        info=info,
+        qoverpt=md.sim_qoverpt,
+        vz=md.sim_vz,
+        sinh_eta=np.sinh(md.sim_eta),
+        md=md,
     )
     return center_eta, center_phi
 
@@ -547,7 +575,7 @@ def helix_center(
     qoverpt: float,
     vz: float,
     sinh_eta: float,
-    info: dict,
+    md: MDOfInterest,
 ) -> tuple[float, float]:
     """
     (eta, phi) where a helix from (0, 0, vz) with q/pT and eta reaches the target layer. eta is seen from the
@@ -558,13 +586,12 @@ def helix_center(
         qoverpt=qoverpt,
         vz=vz,
         sinh_eta=sinh_eta,
-        md_anchor_z=info["md_anchor_z"],
+        md_anchor_z=md.md_anchor_z,
     )
     phi_shift = -(
-        bend(rt=helix_rt, qoverpt=qoverpt)
-        - bend(rt=info["md_anchor_rt"], qoverpt=qoverpt)
+        bend(rt=helix_rt, qoverpt=qoverpt) - bend(rt=md.md_anchor_rt, qoverpt=qoverpt)
     )
-    return np.arcsinh(helix_z / helix_rt), wrap_phi(phi=info["md_phi"] + phi_shift)
+    return np.arcsinh(helix_z / helix_rt), wrap_phi(phi=md.md_phi + phi_shift)
 
 
 def target_radius(
@@ -671,17 +698,17 @@ def nearest_sibling_k(
 
 def log_layer(record: dict) -> None:
     """One [layer] line: per center, its shift from the MD (dphi, deta), dR to the nearest sibling and k."""
-    info = record["md_info"]
+    md = record["md_info"]
     fields = []
     for name in DETAILED_CENTERS:
-        dphi = wrap_phi(phi=record["center_phi"][name] - info["md_phi"])
-        deta = record["center_eta"][name] - info["md_eta"]
+        dphi = wrap_phi(phi=record["center_phi"][name] - md.md_phi)
+        deta = record["center_eta"][name] - md.md_eta
         fields.append(
             f"dphi_{name}={dphi:+.4f} deta_{name}={deta:+.4f} "
             f"dr_{name}={fmt(value=record[f'dr_{name}'])} k_{name}={record[f'k_{name}']}"
         )
     print(
-        f"[layer] tree_entry={info['tree_entry']} i_md={info['i_md']} md_layer={info['md_layer']} "
+        f"[layer] tree_entry={md.tree_entry} i_md={md.i_md} md_layer={md.md_layer} "
         f"layer={record['layer']} in_road={record['in_road']} r_target={record['r_target']:.1f} "
         f"n_md_on_layer={record['n_md_on_layer']} n_siblings={len(record['siblings'])} "
         + " ".join(fields)
@@ -708,7 +735,7 @@ def fmt(value: float | None) -> str:
 
 def plot_md(
     mds: dict[str, np.ndarray],
-    info: dict,
+    md: MDOfInterest,
     layer_records: list[dict],
     centers: list[str],
     pdf: PdfPages,
@@ -721,17 +748,17 @@ def plot_md(
         nrows=n_rows, ncols=n_cols, figsize=(4.2 * n_cols, 4.2 * n_rows)
     )
     axs = axs.ravel()
-    plot_transverse(ax=axs[0], mds=mds, info=info)
+    plot_transverse(ax=axs[0], mds=mds, md=md)
     for ax, record in zip(axs[1:], layer_records):
-        plot_layer(ax=ax, mds=mds, info=info, record=record, centers=centers)
+        plot_layer(ax=ax, mds=mds, md=md, record=record, centers=centers)
     for ax in axs[n_panels:]:
         ax.axis("off")
     axs[1].legend(fontsize="x-small", loc="upper left")
     fig.suptitle(
-        f"MD of interest: tree entry {info['tree_entry']}, layer {info['md_layer']}, {info['region']}, {info['module']}"
-        f" | md_pt={info['md_pt']:.2f} GeV, q/pT estimate {info['md_qoverpt']:+.3f}\n"
-        f"Sim: pdgId {info['sim_pdgId']}, pT {info['sim_pt']:.2f} GeV, eta {info['sim_eta']:+.2f}, "
-        f"q/pT {info['sim_qoverpt']:+.3f} | {len(info['siblings'])} sibling MDs",
+        f"MD of interest: tree entry {md.tree_entry}, layer {md.md_layer}, {md.md_region}, {md.md_module}"
+        f" | md_pt={md.md_pt:.2f} GeV, q/pT estimate {md.md_qoverpt:+.3f}\n"
+        f"Sim: pdgId {md.sim_pdgId}, pT {md.sim_pt:.2f} GeV, eta {md.sim_eta:+.2f}, "
+        f"q/pT {md.sim_qoverpt:+.3f} | {len(md.md_siblings)} sibling MDs",
         fontsize=11,
     )
     fig.tight_layout()
@@ -742,25 +769,21 @@ def plot_md(
 def plot_transverse(
     ax: plt.Axes,
     mds: dict[str, np.ndarray],
-    info: dict,
+    md: MDOfInterest,
 ) -> None:
     """
     x-y view: the sim's MDs, the straight line (own phi) and helices from the beam line through the MD. In x-y, the
     helix with the sim's q/pT is the oracle's track.
     """
-    r_max = (
-        max(mds["md_anchor_rt"][i_md] for i_md in info["siblings"] + [info["i_md"]])
-        * 1.05
-    )
+    r_max = max(mds["md_anchor_rt"][i_md] for i_md in md.md_siblings + [md.i_md]) * 1.05
     rt = np.linspace(0, r_max, 200)
     for label, qoverpt, name in [
         ("own: phi constant", 0.0, "own"),
-        ("helix, MD q/pT", info["md_qoverpt"], "helix"),
-        ("oracle, sim q/pT", info["sim_qoverpt"], "oracle"),
+        ("helix, MD q/pT", md.md_qoverpt, "helix"),
+        ("oracle, sim q/pT", md.sim_qoverpt, "oracle"),
     ]:
-        phi = info["md_phi"] - (
-            bend(rt=rt, qoverpt=qoverpt)
-            - bend(rt=info["md_anchor_rt"], qoverpt=qoverpt)
+        phi = md.md_phi - (
+            bend(rt=rt, qoverpt=qoverpt) - bend(rt=md.md_anchor_rt, qoverpt=qoverpt)
         )
         ax.plot(
             rt * np.cos(phi),
@@ -771,8 +794,8 @@ def plot_transverse(
             label=label,
         )
     ax.scatter(
-        [mds["md_anchor_x"][i_sibling] for i_sibling in info["siblings"]],
-        [mds["md_anchor_y"][i_sibling] for i_sibling in info["siblings"]],
+        [mds["md_anchor_x"][i_sibling] for i_sibling in md.md_siblings],
+        [mds["md_anchor_y"][i_sibling] for i_sibling in md.md_siblings],
         s=25,
         color=COLORS["sibling"],
         edgecolor="white",
@@ -780,8 +803,8 @@ def plot_transverse(
         label="siblings",
     )
     ax.scatter(
-        mds["md_anchor_x"][info["i_md"]],
-        mds["md_anchor_y"][info["i_md"]],
+        mds["md_anchor_x"][md.i_md],
+        mds["md_anchor_y"][md.i_md],
         s=90,
         marker="*",
         color=COLORS["md"],
@@ -801,7 +824,7 @@ def plot_transverse(
 def plot_layer(
     ax: plt.Axes,
     mds: dict[str, np.ndarray],
-    info: dict,
+    md: MDOfInterest,
     record: dict,
     centers: list[str],
 ) -> None:
@@ -810,15 +833,13 @@ def plot_layer(
     # its axis may then run slightly beyond ±pi
     center_x = {}
     for name in centers:
-        center_x[name] = info["md_phi"] + wrap_phi(
-            phi=record["center_phi"][name] - info["md_phi"]
+        center_x[name] = md.md_phi + wrap_phi(
+            phi=record["center_phi"][name] - md.md_phi
         )
     sibling_x = []
     sibling_y = []
     for i_sibling in record["siblings"]:
-        sibling_x.append(
-            info["md_phi"] + wrap_phi(phi=mds["md_phi"][i_sibling] - info["md_phi"])
-        )
+        sibling_x.append(md.md_phi + wrap_phi(phi=mds["md_phi"][i_sibling] - md.md_phi))
         sibling_y.append(mds["md_eta"][i_sibling])
 
     # A square window around the centers, siblings and circles
@@ -830,7 +851,7 @@ def plot_layer(
     half = 0.5 * max(max(xs) - min(xs), max(ys) - min(ys)) + max(radii) + WINDOW
 
     on_layer = (mds["md_layer"] == record["layer"]) & ~mds["md_isPLS"]
-    bkg_x = info["md_phi"] + wrap_phi(phi=mds["md_phi"][on_layer] - info["md_phi"])
+    bkg_x = md.md_phi + wrap_phi(phi=mds["md_phi"][on_layer] - md.md_phi)
     bkg_y = mds["md_eta"][on_layer]
     in_window = (np.abs(bkg_x - middle_x) < half) & (np.abs(bkg_y - middle_y) < half)
     ax.scatter(
@@ -887,8 +908,8 @@ def plot_layer(
         for name in centers:
             k_per_center.append(f"{CENTER_LABELS[name]} {record[f'k_{name}']}")
         result = "k: " + ", ".join(k_per_center)
-    helix_dphi = wrap_phi(phi=record["center_phi"]["helix"] - info["md_phi"])
-    helix_deta = record["center_eta"]["helix"] - info["md_eta"]
+    helix_dphi = wrap_phi(phi=record["center_phi"]["helix"] - md.md_phi)
+    helix_deta = record["center_eta"]["helix"] - md.md_eta
     ax.set_title(
         f"Layer {record['layer']} ({where}{road})\n{result}\n"
         f"r = {record['r_target']:.0f} cm, helix dphi {helix_dphi:+.3f} deta {helix_deta:+.3f}",
@@ -910,14 +931,14 @@ def log_summary(
         groups.append(
             (
                 f"region={name}",
-                [rec for rec in with_sibling if rec["md_info"]["region"] == name],
+                [rec for rec in with_sibling if rec["md_info"].md_region == name],
             )
         )
     for low, high in PT_BINS:
         groups.append(
             (
                 f"sim_pt={low}-{high}",
-                [rec for rec in with_sibling if low <= rec["md_info"]["sim_pt"] < high],
+                [rec for rec in with_sibling if low <= rec["md_info"].sim_pt < high],
             )
         )
     groups.append(("all", with_sibling))
@@ -1003,9 +1024,7 @@ def plot_summary(
     axs[2].set_title("Below the diagonal: the shift helps", fontsize=10)
     axs[2].grid(alpha=0.3)
 
-    n_mds = len(
-        {(rec["md_info"]["tree_entry"], rec["md_info"]["i_md"]) for rec in records}
-    )
+    n_mds = len({(rec["md_info"].tree_entry, rec["md_info"].i_md) for rec in records})
     fig.suptitle(
         f"pT-extrapolated vs plain (eta, phi) neighbourhood: {n_mds} MDs of interest, "
         f"{len(with_sibling)} (MD, layer) pairs with a sibling",
