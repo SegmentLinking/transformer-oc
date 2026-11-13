@@ -29,18 +29,18 @@ to their candidates; with the default 100, all 11 layers (flat and tilted barrel
 almost always appear. Positions are anchor hits, as in md_eta and md_phi.
 Self-contained: reads one LSTNtuple and nothing else from the repo.
 
-Outputs in --output:
-    md_<N>.pdf: one figure per MD. First panel: x-y view of the sim's MDs, with the straight line (own phi) and
-        the helices with the MD's and the sim's q/pT. Then one panel per layer: the layer's MDs near the centers in
-        (phi, eta), siblings highlighted, and a circle around each center reaching the nearest sibling, so it
+Output: one pdf, --output.
+    Page 1, summary: k and dR to the nearest sibling per center, over all MDs of interest and layers.
+    Then one page per MD, in layer order. First panel: x-y view of the sim's MDs, with the straight line (own phi)
+        and the helices with the MD's and the sim's q/pT. Then one panel per layer: the layer's MDs near the centers
+        in (phi, eta), siblings highlighted, and a circle around each center reaching the nearest sibling, so it
         holds k MDs.
-    summary.png/pdf: k and dR to the nearest sibling per center, over all MDs of interest and layers.
 Logs (key=value): [check] per event, [md] per MD of interest, [layer] per (MD, layer), [summary] per category.
 
 Usage (from the repo root):
     apptainer exec /ceph/users/atuna/ml-tracking.sif python3 studies/md_extrapolation_demo.py \
-        --input ../transformer-datasets/samples/ttbar/LSTNtuple_<X>.root --n_mds 100 \
-        --output ../md_plots/extrapolation/
+        --input ../transformer-datasets/samples/ttbar/LSTNtuple_<X>.root \
+        --output ../md_plots/md_extrapolation.pdf
 """
 
 import os
@@ -54,6 +54,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.backends.backend_pdf import PdfPages
 import uproot
 
 LAYERS = range(1, 12)
@@ -163,27 +164,33 @@ def main() -> None:
     if args.dump_geometry:
         dump_geometry(input_path=args.input)
         return
-    os.makedirs(args.output, exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     rng = random.Random(args.seed)
     centers = DETAILED_CENTERS if args.detailed else SALIENT_CENTERS
-    records = []
     with uproot.open(args.input) as root_file:
         mds, sims = read_event(tree=root_file["tree"], tree_entry=args.tree_entry)
     check_lst_estimates(mds=mds, tree_entry=args.tree_entry)
-    chosen = pick_mds(mds=mds, sims=sims, rng=rng, n_mds=args.n_mds)
-    for n_done, i_md in enumerate(chosen):
+
+    # Study every MD first, so the summary can be the first page
+    studied = []
+    records = []
+    for i_md in pick_mds(mds=mds, sims=sims, rng=rng, n_mds=args.n_mds):
         info, layer_records = study_md(mds=mds, sims=sims, i_md=i_md)
-        path = os.path.join(args.output, f"md_{n_done:03d}.pdf")
-        plot_md(
-            mds=mds,
-            info=info,
-            layer_records=layer_records,
-            centers=centers,
-            path=path,
-        )
+        studied.append((info, layer_records))
         records.extend(layer_records)
     log_summary(records=records, centers=centers)
-    plot_summary(records=records, centers=centers, output=args.output)
+
+    with PdfPages(args.output) as pdf:
+        plot_summary(records=records, centers=centers, pdf=pdf)
+        for info, layer_records in studied:
+            plot_md(
+                mds=mds,
+                info=info,
+                layer_records=layer_records,
+                centers=centers,
+                pdf=pdf,
+            )
+    print(f"[done] output={args.output} n_pages={1 + len(studied)}")
 
 
 def parse_args() -> Namespace:
@@ -202,7 +209,12 @@ def parse_args() -> Namespace:
         action="store_true",
         help="Also show the helix with the sim's q/pT and the helix from the sim's vertex",
     )
-    parser.add_argument("--output", type=str, default="extrapolation/")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="md_extrapolation.pdf",
+        help="The pdf to write",
+    )
     parser.add_argument(
         "--dump_geometry",
         action="store_true",
@@ -699,8 +711,9 @@ def plot_md(
     info: dict,
     layer_records: list[dict],
     centers: list[str],
-    path: str,
+    pdf: PdfPages,
 ) -> None:
+    """One page per MD of interest: the x-y view, then one panel per layer."""
     n_panels = 1 + len(layer_records)
     n_cols = 4
     n_rows = (n_panels + n_cols - 1) // n_cols
@@ -722,9 +735,8 @@ def plot_md(
         fontsize=11,
     )
     fig.tight_layout()
-    fig.savefig(path, dpi=150)  # dpi of the rasterized background MDs only
+    pdf.savefig(fig, dpi=150)  # dpi of the rasterized background MDs only
     plt.close(fig)
-    print(f"[done] output={path}")
 
 
 def plot_transverse(
@@ -938,8 +950,9 @@ def log_summary(
 def plot_summary(
     records: list[dict],
     centers: list[str],
-    output: str,
+    pdf: PdfPages,
 ) -> None:
+    """The summary page: k and dR to the nearest sibling per center, and k vs own."""
     with_sibling = [rec for rec in records if len(rec["siblings"]) > 0]
     fig, axs = plt.subplots(nrows=1, ncols=3, figsize=(15, 4.6))
     for name in centers:
@@ -999,11 +1012,8 @@ def plot_summary(
         fontsize=11,
     )
     fig.tight_layout()
-    path = os.path.join(output, "summary")
-    fig.savefig(path + ".png", dpi=150)
-    fig.savefig(path + ".pdf")
+    pdf.savefig(fig)
     plt.close(fig)
-    print(f"[done] output={path}.png")
 
 
 if __name__ == "__main__":
