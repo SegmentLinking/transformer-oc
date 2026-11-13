@@ -29,6 +29,9 @@ T5s, T4s, T5 + T4 (main.py load_t5_data / calculate_t5_metrics):
   duplicate rate  of the same objects, those flagged as duplicate by LST (<obj>_isDuplicate: the object shares
                   a hit-matched sim track with another object; recomputed for T5 + T4)
   pT outside the bins is dropped. The duplicate rate is binned in the object pT, eta (as in main.py).
+  T5s: only those with t5_nLayers <= --t5-max-layers (default 5), i.e. no T5s extended with the layers of the
+  duplicates they absorbed in the LST duplicate cleaning; extended T5s are dropped from every metric (including
+  the efficiency and the recomputed duplicate flag) and from T5 + T4.
 
 Bins, eta_cut and purity_threshold are read from the config, as in main.py.
 
@@ -78,6 +81,15 @@ def offsets(per_event):
 def to_global(index, per_event):
     """Flattened index[event][i] (an index into per_event[event]) as an index into the flattened per_event."""
     return flat(index).astype(np.int64) + np.repeat(offsets(per_event), ak.to_numpy(ak.num(index, axis=1)))
+
+
+def take(per_event, index):
+    """per_event[event][index[event][i][j]] for a doubly jagged index."""
+    n = ak.to_numpy(ak.num(per_event, axis=1))
+    starts = np.concatenate([[0], np.cumsum(n)[:-1]])
+    flat_values = ak.flatten(per_event)[ak.flatten(index + starts, axis=None)]
+    inner = ak.unflatten(flat_values, ak.flatten(ak.num(index, axis=2)))
+    return ak.unflatten(inner, ak.num(index, axis=1))
 
 
 def majority_match(obj, sim, n_slots, threshold, strict=False):
@@ -138,7 +150,7 @@ def process(arrays, objects, results, totals, args):
     md_sim, md_layer = flat(arrays["md_simIdx"]).astype(np.int64), flat(arrays["md_layer"]).astype(np.int64)
 
     # per object type: kept objects, MD-matched sim track (global index, -1 if none or pileup), fake flag, pt, eta
-    matched_sim, is_fake, kinematics = {}, {}, {}
+    matched_sim, is_fake, kinematics, kept = {}, {}, {}, {}
     for obj in objects:
         # the T3s of every object: object index (in the chunk) and global T3 index of every (object, T3) pair
         if obj == "oc":
@@ -160,6 +172,9 @@ def process(arrays, objects, results, totals, args):
         keep = np.ones(len(sim), dtype=bool)
         if obj == "oc" and args.oc_min_layers > 0:
             keep = n_distinct(obj_of_md, md_layer[mds], len(sim)) >= args.oc_min_layers
+        if obj == "t5" and args.t5_max_layers > 0:
+            keep = flat(arrays["t5_nLayers"]) <= args.t5_max_layers  # no extended T5s
+        kept[obj] = keep
         evt = np.repeat(np.arange(len(n_obj)), n_obj)
         is_fake[obj] = (sim < 0)[keep]
         sim = np.where((sim >= 0) & (sim < n_sim[evt]), sim + sim_offsets[evt], -1)
@@ -195,8 +210,12 @@ def process(arrays, objects, results, totals, args):
             r["fake_rate"].fill(pt[used], eta[used], is_fake["oc"][used], np.ones(np.sum(used), dtype=bool))
             continue
         # LST objects: efficiency and duplicates from the LST hit matching (objects with > purity_threshold of
-        # their hits from one sim track), fakes from the MDs
-        n_matched = sum(flat(ak.sum(arrays[f"sim_{obj}IdxAllFrac"] > args.purity_threshold, axis=-1)) for obj in objs)
+        # their hits from one sim track), fakes from the MDs; only kept objects count
+        n_matched = 0
+        for obj in objs:
+            kept_jagged = ak.unflatten(kept[obj], ak.num(arrays[f"{obj}_pt"]))
+            matched = (arrays[f"sim_{obj}IdxAllFrac"] > args.purity_threshold) & take(kept_jagged, arrays[f"sim_{obj}IdxAll"])
+            n_matched = n_matched + flat(ak.sum(matched, axis=-1))
         s = selected
         r["efficiency"].fill(sim_pt[s], sim_eta[s], (n_matched > 0)[s], in_pt_plot[s])
         for obj in objs:
@@ -209,8 +228,10 @@ def process(arrays, objects, results, totals, args):
             obj_of_entry = np.repeat(np.arange(len(per_obj)), per_obj)
             duplicate = np.zeros(len(per_obj), dtype=bool)
             duplicate[obj_of_entry[n_matched[g] > 1]] = True
-            if len(objs) == 1 and not np.array_equal(duplicate, flat(arrays[f"{obj}_isDuplicate"]) == 1):
+            filtered = obj == "t5" and args.t5_max_layers > 0  # the ntuple flag counts every T5
+            if len(objs) == 1 and not filtered and not np.array_equal(duplicate, flat(arrays[f"{obj}_isDuplicate"]) == 1):
                 raise RuntimeError(f"{obj}_isDuplicate differs from the recomputed duplicate flag")
+            duplicate = duplicate[kept[obj]]
             pt, eta = kinematics[obj]
             used = (pt > 0.8) & (pt < 100)
             all_used = np.ones(np.sum(used), dtype=bool)
@@ -271,6 +292,8 @@ def main():
     parser.add_argument("--output", required=True, help="output directory")
     parser.add_argument("--tree", default="tree")
     parser.add_argument("--oc-min-layers", type=int, default=5, help="drop clusters with less MD layers (main.py: 5)")
+    parser.add_argument("--t5-max-layers", type=int, default=5,
+                        help="use only T5s with at most this many layers, i.e. no extended T5s (<= 0: all T5s)")
     parser.add_argument("--n-events", type=int, default=-1)
     parser.add_argument("--t4", action="store_true", help="also plot T4 and T5 + T4")
     args = parser.parse_args()
@@ -288,7 +311,7 @@ def main():
     os.makedirs(args.output, exist_ok=True)
 
     available = set(uproot.open(f"{files[0]}:{args.tree}").keys())
-    required = {"oc": ["oc_t3Idx"], "t5": ["t5_t3Idx0", "t5_t3Idx1"]}
+    required = {"oc": ["oc_t3Idx"], "t5": ["t5_t3Idx0", "t5_t3Idx1"] + (["t5_nLayers"] if args.t5_max_layers > 0 else [])}
     if args.t4:
         required["t4"] = ["t4_t3Idx0", "t4_t3Idx1"]
     objects = []
@@ -302,7 +325,7 @@ def main():
     for obj in objects:
         branches += required[obj] + [f"{obj}_pt", f"{obj}_eta"]
         if obj != "oc":
-            branches += [f"sim_{obj}IdxAllFrac", f"{obj}_simIdxAll", f"{obj}_isDuplicate"]
+            branches += [f"sim_{obj}IdxAll", f"sim_{obj}IdxAllFrac", f"{obj}_simIdxAll", f"{obj}_isDuplicate"]
     missing = [b for b in branches if b not in available]
     if missing:
         sys.exit(f"the ntuple has no {', '.join(missing)} (run lst with --md --ls --t3 --t4 --t5)")
@@ -323,11 +346,14 @@ def main():
         print(f"processed {n_events} events")
 
     tag = f"_oc{args.oc_min_layers}layers" if args.oc_min_layers != 5 else ""
+    if args.t5_max_layers != 5:
+        tag += f"_t5max{args.t5_max_layers}layers" if args.t5_max_layers > 0 else "_t5all"
     plot_comparison(results, series, pt_bins, eta_bins, args.output, tag)
 
     print("\n" + "=" * 60)
     print(f"Events: {n_events}, purity threshold: {args.purity_threshold}, eta cut (pT plots): {args.eta_cut}, "
-          f"clusters with >= {args.oc_min_layers} MD layers")
+          f"clusters with >= {args.oc_min_layers} MD layers, "
+          + (f"T5s with <= {args.t5_max_layers} layers" if args.t5_max_layers > 0 else "all T5s"))
     print(f"Selected sim tracks: {totals['sims']} (LST denominator), with a matched T3: {totals['sims_with_t3']}"
           f" (transformer denominator)")
     print(f"{'':16s} {'objects/evt':>11s} {'efficiency':>11s} {'fake rate':>10s} {'dup. rate':>10s}")
