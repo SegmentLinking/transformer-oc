@@ -45,6 +45,7 @@ Usage (from the repo root):
 import os
 import random
 from argparse import ArgumentParser, Namespace
+from pprint import pprint
 
 import awkward as ak
 import matplotlib
@@ -141,9 +142,26 @@ SIM_COLUMNS = [
     "sim_vz",
 ]
 
+GEOMETRY = {
+    1: {"rt_median": 25.0, "abs_z_max": 119.9},
+    2: {"rt_median": 37.4, "abs_z_max": 119.9},
+    3: {"rt_median": 52.4, "abs_z_max": 119.9},
+    4: {"rt_median": 67.4, "abs_z_max": 115.2},
+    5: {"rt_median": 84.7, "abs_z_max": 115.2},
+    6: {"rt_median": 106.9, "abs_z_max": 115.2},
+    7: {"abs_z_median": 130.3, "rt_min": 23.7, "rt_max": 104.9},
+    8: {"abs_z_median": 154.1, "rt_min": 23.7, "rt_max": 104.9},
+    9: {"abs_z_median": 184.4, "rt_min": 33.2, "rt_max": 104.9},
+    10: {"abs_z_median": 220.7, "rt_min": 33.2, "rt_max": 104.9},
+    11: {"abs_z_median": 264.1, "rt_min": 33.2, "rt_max": 104.9},
+}
+
 
 def main() -> None:
     args = parse_args()
+    if args.dump_geometry:
+        dump_geometry(input_path=args.input)
+        return
     os.makedirs(args.output, exist_ok=True)
     rng = random.Random(args.seed)
     centers = DETAILED_CENTERS if args.detailed else SALIENT_CENTERS
@@ -186,7 +204,52 @@ def parse_args() -> Namespace:
         help="Also show the helix with the sim's q/pT and the helix from the sim's vertex",
     )
     parser.add_argument("--output", type=str, default="extrapolation/")
+    parser.add_argument(
+        "--dump_geometry",
+        action="store_true",
+        help="Only print GEOMETRY, measured over all events of --input, to paste into this script",
+    )
     return parser.parse_args()
+
+
+def dump_geometry(input_path: str) -> None:
+    """
+    Print GEOMETRY, the extent of each layer from the anchor hits of all OT MDs over all events of the
+    LSTNtuple, as a Python constant to paste at the top of this script. Only the entries the script uses: barrel
+    layers, rt_median and abs_z_max; endcap layers, abs_z_median, rt_min and rt_max.
+    """
+    rt_on_layer = {layer: [] for layer in LAYERS}
+    abs_z_on_layer = {layer: [] for layer in LAYERS}
+    with uproot.open(input_path) as f:
+        tree = f["tree"]
+        n_events = tree.num_entries
+        for tree_entry in range(n_events):
+            mds, _ = read_event(tree=tree, tree_entry=tree_entry)
+            for layer in LAYERS:
+                on_layer = (mds["md_layer"] == layer) & ~mds["md_isPLS"]
+                rt_on_layer[layer].append(mds["md_anchor_rt"][on_layer])
+                abs_z_on_layer[layer].append(np.abs(mds["md_anchor_z"][on_layer]))
+
+    print("# Extent of each layer [cm], from the anchor hits of all OT MDs")
+    print(f"# in {n_events} events of {os.path.basename(input_path)} (--dump_geometry)")
+    geometry = {}
+    for layer in LAYERS:
+        rt = np.concatenate(rt_on_layer[layer])
+        abs_z = np.concatenate(abs_z_on_layer[layer])
+        # float() so numpy scalars print as plain numbers, not np.float64(...)
+        if layer in BARREL_LAYERS:
+            geometry[layer] = {
+                "rt_median": round(float(np.median(rt)), 1),
+                "abs_z_max": round(float(abs_z.max()), 1),
+            }
+        else:
+            geometry[layer] = {
+                "abs_z_median": round(float(np.median(abs_z)), 1),
+                "rt_min": round(float(rt.min()), 1),
+                "rt_max": round(float(rt.max()), 1),
+            }
+    print("GEOMETRY = ", end="")
+    pprint(geometry, sort_dicts=False)
 
 
 def read_event(
