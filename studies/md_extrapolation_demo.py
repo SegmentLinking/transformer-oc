@@ -24,8 +24,9 @@ For each MD of interest (a true outer-tracker MD of a prompt hard-scatter sim wi
      within that dR (k = 1: the sibling is the nearest MD on the layer). k is the number of neighbours per layer a
      model needs to see that sibling. The MD's own layer is skipped.
 
-The MDs of interest are picked one per layer (1 to 11) per event, at random, until --n_mds are done, so flat and
-tilted barrel, endcap, PS and 2S modules all appear. Positions are anchor hits, as in md_eta and md_phi.
+The --n_mds MDs of interest are drawn at random from one event (--tree_entry), so the layers appear in proportion
+to their candidates; with the default 100, all 11 layers (flat and tilted barrel, endcap, PS and 2S modules)
+almost always appear. Positions are anchor hits, as in md_eta and md_phi.
 Self-contained: reads one LSTNtuple and nothing else from the repo.
 
 Outputs in --output:
@@ -166,26 +167,21 @@ def main() -> None:
     rng = random.Random(args.seed)
     centers = DETAILED_CENTERS if args.detailed else SALIENT_CENTERS
     records = []
-    n_done = 0
     with uproot.open(args.input) as root_file:
-        tree = root_file["tree"]
-        for tree_entry in range(tree.num_entries):
-            mds, sims = read_event(tree=tree, tree_entry=tree_entry)
-            check_lst_estimates(mds=mds, tree_entry=tree_entry)
-            for i_md in pick_mds(mds=mds, sims=sims, rng=rng, n=args.n_mds - n_done):
-                info, layer_records = study_md(mds=mds, sims=sims, i_md=i_md)
-                path = os.path.join(args.output, f"md_{n_done:03d}.pdf")
-                plot_md(
-                    mds=mds,
-                    info=info,
-                    layer_records=layer_records,
-                    centers=centers,
-                    path=path,
-                )
-                records.extend(layer_records)
-                n_done += 1
-            if n_done == args.n_mds:
-                break
+        mds, sims = read_event(tree=root_file["tree"], tree_entry=args.tree_entry)
+    check_lst_estimates(mds=mds, tree_entry=args.tree_entry)
+    chosen = pick_mds(mds=mds, sims=sims, rng=rng, n_mds=args.n_mds)
+    for n_done, i_md in enumerate(chosen):
+        info, layer_records = study_md(mds=mds, sims=sims, i_md=i_md)
+        path = os.path.join(args.output, f"md_{n_done:03d}.pdf")
+        plot_md(
+            mds=mds,
+            info=info,
+            layer_records=layer_records,
+            centers=centers,
+            path=path,
+        )
+        records.extend(layer_records)
     log_summary(records=records, centers=centers)
     plot_summary(records=records, centers=centers, output=args.output)
 
@@ -193,7 +189,13 @@ def main() -> None:
 def parse_args() -> Namespace:
     parser = ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--input", type=str, required=True, help="One LSTNtuple")
-    parser.add_argument("--n_mds", type=int, default=22)
+    parser.add_argument(
+        "--tree_entry",
+        type=int,
+        default=0,
+        help="Entry (event) of --input to draw the MDs of interest from",
+    )
+    parser.add_argument("--n_mds", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--detailed",
@@ -300,11 +302,11 @@ def pick_mds(
     mds: dict[str, np.ndarray],
     sims: dict[str, np.ndarray],
     rng: random.Random,
-    n: int,
+    n_mds: int,
 ) -> list[int]:
     """
-    Up to n MDs of interest, one per layer in layer order, each picked at random among the true OT MDs of a
-    selected sim with at least one sibling on another layer.
+    n_mds MDs of interest (or all candidates, if fewer), drawn at random among the true OT MDs of a selected sim
+    with at least one sibling on another layer, sorted by layer.
     """
     layers_of_sim = {}
     for i_md in range(len(mds["md_layer"])):
@@ -314,7 +316,7 @@ def pick_mds(
         layers_of_sim.setdefault(simidx, set()).add(mds["md_layer"][i_md])
 
     two_layers = 2
-    candidates = {layer: [] for layer in LAYERS}
+    candidates = []
     for i_md in range(len(mds["md_layer"])):
         simidx = mds["md_simIdx"][i_md]
         if (
@@ -325,14 +327,10 @@ def pick_mds(
             continue
         if len(layers_of_sim[simidx]) < two_layers:
             continue
-        candidates[mds["md_layer"][i_md]].append(i_md)
+        candidates.append(i_md)
 
-    chosen = []
-    for layer in LAYERS:
-        if len(chosen) == n:
-            break
-        chosen.append(rng.choice(candidates[layer]))
-    return chosen
+    chosen = rng.sample(candidates, min(n_mds, len(candidates)))
+    return sorted(chosen, key=lambda i_md: mds["md_layer"][i_md])
 
 
 def unmatched(simidx: int) -> bool:
