@@ -189,17 +189,12 @@ def calculate_tracking_metrics(
         t3_md1_y = x_features[cluster_indices, 23]
         t3_md2_x = x_features[cluster_indices, 31]
         t3_md2_y = x_features[cluster_indices, 32]
-        t3_md3_x = x_features[cluster_indices, 40]
-        t3_md3_y = x_features[cluster_indices, 41]
 
         t3_md0_r = np.sqrt(t3_md0_x**2 + t3_md0_y**2)
         t3_md1_r = np.sqrt(t3_md1_x**2 + t3_md1_y**2)
         t3_md2_r = np.sqrt(t3_md2_x**2 + t3_md2_y**2)
-        t3_md3_r = np.sqrt(t3_md3_x**2 + t3_md3_y**2)
 
-        t3_lowest_r = np.minimum(
-            np.minimum(t3_md0_r, t3_md1_r), np.minimum(t3_md2_r, t3_md3_r)
-        )
+        t3_lowest_r = np.minimum(np.minimum(t3_md0_r, t3_md1_r), t3_md2_r)
         lowest_r_idx = np.argmin(t3_lowest_r)
         reco_track_pt = float(segment_pts[lowest_r_idx])
         reco_track_eta = float(segment_etas[lowest_r_idx])
