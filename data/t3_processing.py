@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch_geometric.data import Data
 
-import random
+import hashlib
 
 from constants import SIM_VARS, T3_VARS, T3_HIT_SIMIDX, T3_HIT_LAYER, T3_PMATCHED, LS_INDEX, LS_VARS, MD_VARS, MD_INDEX
 from constants import TARGET, FAKE_TARGET, LAYER_INFO, MD_SIMIDX, ALL_COLUMNS, MIN_T3_PT, MAX_T3_PT, UNMATCHED
@@ -91,7 +91,7 @@ class GraphBuilder:
     def process_event(self, event_data, idx, args):
         """Processes a single event and saves the graph."""
         try:
-            if random.random() < self.train_split:
+            if split_value(idx, args.seed) < self.train_split:
                 output_file = os.path.join(self.train_path, f"graph_{idx}.pt")
             else:
                 output_file = os.path.join(self.val_path, f"graph_{idx}.pt")
@@ -246,6 +246,17 @@ class GraphBuilder:
             print(f"Skipped {skipped_existing} existing graph indices before read/submit.")
 
 
+def split_value(idx: int, seed: int) -> float:
+    """
+    Deterministic number in [0, 1) for the train/val split of graph idx.
+
+    It depends only on (seed, idx), so an event goes to the same split for any number of
+    workers and any processing order. Events with split_value < train_split go to train.
+    """
+    digest = hashlib.blake2b(f"{seed}:{idx}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "little") / 2**64
+
+
 def unique_t3_md_indices(md_idx: np.ndarray) -> np.ndarray:
     """
     Reduce the MD indices of each T3's two LSs to its three distinct MDs, inner to outer.
@@ -389,11 +400,9 @@ if __name__ == "__main__":
     argparser.add_argument("--split", type=float, default=0.8, help="Train/val split ratio")
     argparser.add_argument("--nofakes", action="store_true", help="Exclude fake hits from the graphs")
     argparser.add_argument("--chunk_size", type=int, default=256, help="Number of events to read per ROOT I/O chunk")
-    argparser.add_argument("--seed", type=int, default=None, help="Optional random seed for train/val split")
+    argparser.add_argument("--seed", type=int, default=0,
+                           help="Seed of the train/val split (deterministic per graph index; see split_value)")
     args = argparser.parse_args()
-
-    if args.seed is not None:
-        random.seed(args.seed)
 
     if not os.path.exists(args.output):
         os.makedirs(args.output)
