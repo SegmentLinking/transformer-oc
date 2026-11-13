@@ -6,7 +6,7 @@ Runs the model on the events in --data-dir, and collects the embedding of every 
 (up to --n-t3s T3s, so memory stays bounded) together with its raw input features.
 
 PCA: a PCA of the embeddings finds the directions of largest variance. For each of
-the first --n-pca components, and for each of the 49 T3 features in x, a 2D
+the first --n-pca components, and for each of the 40 T3 features in x, a 2D
 histogram of the component vs the feature shows whether that direction of the
 embedding tracks something physical.
 
@@ -96,9 +96,9 @@ rcParams.update(
     }
 )
 
-# Names of the 49 columns of x, in the order built by data/t3_processing.py:
-# the T3, then its two LSs, then the four MDs of those LSs (LS 0's outer MD and
-# LS 1's inner MD are the same MD, so MD 1 and MD 2 repeat each other)
+# Names of the 40 columns of x, in the order built by data/t3_processing.py:
+# the T3, then its two LSs, then its three distinct MDs, inner to outer (the
+# middle MD is shared by both LSs)
 # pT is plotted as log10, since it has a long tail (and the model sees log pT too)
 T3_NAMES = ["log10(t3_pt)", "t3_eta", "t3_phi"]
 LS_VARS = ["dPhi", "dPhiChange", "dAlphaInner", "dAlphaOuter", "dAlphaInnerOuter"]
@@ -114,7 +114,7 @@ MD_VARS = [
     "dz",
 ]
 LS_NAMES = [f"ls{i}_{var}" for i in range(2) for var in LS_VARS]
-MD_NAMES = [f"md{i}_{var}" for i in range(4) for var in MD_VARS]
+MD_NAMES = [f"md{i}_{var}" for i in range(3) for var in MD_VARS]
 FEATURE_NAMES = T3_NAMES + LS_NAMES + MD_NAMES
 
 # Names of the 8 columns of sim_features (SIM_VARS in data/constants.py), and of

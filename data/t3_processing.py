@@ -14,6 +14,7 @@ import random
 
 from constants import SIM_VARS, T3_VARS, T3_HIT_SIMIDX, T3_HIT_LAYER, T3_PMATCHED, LS_INDEX, LS_VARS, MD_VARS, MD_INDEX
 from constants import TARGET, FAKE_TARGET, LAYER_INFO, MD_SIMIDX, ALL_COLUMNS, MIN_T3_PT, MAX_T3_PT, UNMATCHED
+from constants import N_T3_MDS
 
 
 class GraphBuilder:
@@ -117,16 +118,16 @@ class GraphBuilder:
             ls_features = ak.to_dataframe(event_data[LS_VARS]).values[ls_idx]
             ls_features = ls_features.reshape(-1, 2 * len(LS_VARS))
 
-            md_idx_flat = md_idx.reshape(-1, 4)
-            md_features = ak.to_dataframe(event_data[MD_VARS]).values[md_idx_flat]
+            md_idx_flat = unique_t3_md_indices(md_idx)
 
-            md_features = md_features.reshape(-1, 4 * len(MD_VARS))
+            md_features = ak.to_dataframe(event_data[MD_VARS]).values[md_idx_flat]
+            md_features = md_features.reshape(-1, N_T3_MDS * len(MD_VARS))
 
             md_layer = ak.to_dataframe(event_data[LAYER_INFO]).values[md_idx_flat]
-            md_layer = md_layer.reshape(-1, 4)
+            md_layer = md_layer.reshape(-1, N_T3_MDS)
 
             md_simIdx = ak.to_dataframe(event_data[MD_SIMIDX]).values[md_idx_flat]
-            md_simIdx = md_simIdx.reshape(-1, 4)
+            md_simIdx = md_simIdx.reshape(-1, N_T3_MDS)
 
             hit_simIdx = convert_hit_simIdx_to_array(event_data[T3_HIT_SIMIDX])
             pMatched_by_hand = calculate_pMatched(hit_simIdx)
@@ -230,6 +231,20 @@ class GraphBuilder:
 
         if skipped_existing:
             print(f"Skipped {skipped_existing} existing graph indices before read/submit.")
+
+
+def unique_t3_md_indices(md_idx: np.ndarray) -> np.ndarray:
+    """
+    Reduce the MD indices of each T3's two LSs to its three distinct MDs, inner to outer.
+
+    Input: integer array of shape (n_t3, 2, 2), indexed [t3, ls, md in ls].
+    Output: integer array of shape (n_t3, N_T3_MDS) = (LS0.md0, LS0.md1, LS1.md1).
+
+    The two LSs of a T3 share their middle MD (LS0.md1 is LS1.md0), so that slot is dropped.
+    """
+    if not np.array_equal(md_idx[:, 0, 1], md_idx[:, 1, 0]):
+        raise ValueError("Found a T3 whose two LSs do not share their middle MD")
+    return np.stack([md_idx[:, 0, 0], md_idx[:, 0, 1], md_idx[:, 1, 1]], axis=1)
 
 
 def convert_hit_simIdx_to_array(t3_hit_simIdx: ak.Array) -> np.ndarray:

@@ -41,7 +41,7 @@ apptainer exec --nv /ceph/users/atuna/ml-tracking.sif python3 <script> ...
 
 - Raw LSTNtuples (ttbar PU200): `/ceph/users/atuna/work/cms_tracking_ml/data/output_pu200/output_pu200_*.root`
 - Preprocessed: `data/pu200_t3/{train,val}/graph_*.pt` (regenerated locally) and `data/aashay_pu200_t3/{train,val}` (Aashay's original, 5540 train / 1320 val).
-- Each `graph_N.pt` is a `torch_geometric.data.Data` point cloud with no edges: `x` (`[N_T3, 49]` T3 features), `sim_index` (`[N_T3]`, target sim-track index, negative means fake/unmatched), `sim_features` (`[N_sim, 8]`), `md_layer` and `md_simIdx` (`[N_T3, 4]`). An event has about 60k T3s.
+- Each `graph_N.pt` is a `torch_geometric.data.Data` point cloud with no edges: `x` (`[N_T3, 40]` T3 features: 3 T3, 2 × 5 LS, 3 × 9 MD for the T3's three distinct MDs, inner to outer), `sim_index` (`[N_T3]`, target sim-track index, negative means fake/unmatched), `sim_features` (`[N_sim, 8]`), `md_layer` and `md_simIdx` (`[N_T3, 3]`), `hit_layer` and `hit_simIdx` (`[N_T3, 6]`, two hits per MD). An event has about 60k T3s. Graphs made before the duplicate middle MD was dropped have 49 features and 4 MD slots, and don't work with the current code.
 
 ## Common commands (run from the repo root)
 
@@ -64,7 +64,7 @@ cd data && python3 test_t3_processing.py
 Several of these (flat imports, normalization, batch = 1 event, OC targets) describe the current code and are expected to change with the redesign above.
 
 - **Imports are flat** (`from dataset import ...`, `from constants import ...`). `src/` scripts rely on their own directory being on `sys.path`, `analysis/main.py` does `sys.path.append('./src')`, and config data paths are relative. Run from the repo root (preprocessing from `data/`).
-- **Feature normalization is hardcoded.** `PCDataset.__getitem__` log-transforms `x[:, 0]` (pT) and then min/max-normalizes with tensors hardcoded for a 26- or 49-feature layout. `TransformerOCModel.build_neighbor_index` un-normalizes η and φ from columns 1 and 2 using hardcoded ranges. If you add, remove or reorder features in `t3_processing.py`, update both places.
+- **Feature normalization is hardcoded.** `PCDataset.__getitem__` log-transforms `x[:, 0]` (pT) and then min/max-normalizes with tensors hardcoded in `src/constants.py` for a 26- or 40-feature layout. `TransformerOCModel.build_neighbor_index` un-normalizes η and φ from columns 1 and 2 using hardcoded ranges, and `analysis/measures.py` reads the MD anchor x/y from columns 13/14, 22/23 and 31/32. If you add, remove or reorder features in `t3_processing.py`, update all of these.
 - **Batch size is 1 event** (the PyG `DataLoader` default), with `accumulate_grad_batches` for an effective batch. Memory scales with `N_T3 × max_neighbors × hidden_dim`. Full-size configs have OOMed on a 16 GB GPU, so use `config_pu200_dev.yaml` (small `hidden_dim`, `max_neighbors`, subsets) locally.
 - Attention is sparse over ΔR neighbors (`dr_threshold`, `max_neighbors`), not full self-attention.
 - OC targets: `sim_index < 0` is mapped to `-1` (noise) in the training and validation steps.

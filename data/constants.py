@@ -10,6 +10,7 @@ LS_VARS = ["ls_dPhis", "ls_dPhiChanges", "ls_dAlphaInners", "ls_dAlphaOuters", "
 
 MD_VARS = ["md_anchor_x", "md_anchor_y", "md_anchor_z", "md_other_x", "md_other_y", "md_other_z", "md_dphi", "md_dphichange", "md_dz"]
 MD_INDEX = ["ls_mdIdx0", "ls_mdIdx1"]
+N_T3_MDS = 3  # distinct MDs per T3 (its two LSs share the middle one)
 
 TARGET = ["t3_simIdx"]
 
