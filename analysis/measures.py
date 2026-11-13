@@ -14,6 +14,12 @@ hep.style.use(hep.style.CMS)
 from profiler import InferenceProfiler, print_gpu_info, profile_memory
 
 
+def to_numpy(t):
+    """Tensor -> NumPy copy. Uses DLPack because CMSSW's torch is built without NumPy support,
+    so tensor.numpy() fails there."""
+    return np.from_dlpack(t.detach().cpu().contiguous()).copy()
+
+
 @torch.no_grad()
 def run_inference_and_clustering(
     data,
@@ -67,11 +73,11 @@ def run_inference_and_clustering(
     # Transfer to CPU
     if profiler:
         with profiler.profile_section("gpu_to_cpu_transfer"):
-            X_cpu = X.cpu().numpy()
-            beta_cpu = beta.cpu().numpy()
+            X_cpu = to_numpy(X)
+            beta_cpu = to_numpy(beta)
     else:
-        X_cpu = X.cpu().detach().numpy()
-        beta_cpu = beta.cpu().detach().numpy()
+        X_cpu = to_numpy(X)
+        beta_cpu = to_numpy(beta)
 
     # Clustering
     if profiler:
@@ -128,13 +134,13 @@ def calculate_tracking_metrics(
     vtxperp_bins=None,
 ):
     sim_features = data.sim_features
-    t3_truth_labels = data.sim_index.cpu().detach().numpy().flatten()
+    t3_truth_labels = to_numpy(data.sim_index).flatten()
     t3_truth_labels[t3_truth_labels < 0] = -1
 
-    x_features = data.x.cpu().detach().numpy()
+    x_features = to_numpy(data.x)
 
-    md_layers = data.md_layer.cpu().detach().numpy()
-    md_simIdx = data.md_simIdx.cpu().detach().numpy()
+    md_layers = to_numpy(data.md_layer)
+    md_simIdx = to_numpy(data.md_simIdx)
 
     if x_features.shape[1] == 26:
         min_pt, max_pt = -1.02, 7.0
@@ -202,7 +208,7 @@ def calculate_tracking_metrics(
         cluster_md_layers = md_layers[cluster_indices]
         all_layers = set(cluster_md_layers.flatten())
         layer_span = len(all_layers)
-        if layer_span < 5:
+        if layer_span < 4:
             continue
 
         if reco_track_pt != -999.0 and reco_track_eta != -999.0:
@@ -481,7 +487,7 @@ def plot_performance_histograms(
             ax.set_ylim(ylim)
 
         hep.cms.label(
-            text="Preliminary",
+            "Preliminary",
             data=False,
             rlabel=r"Phase-2 (14 TeV)",
             ax=ax,
@@ -518,7 +524,7 @@ def plot_cluster_size_histogram(
     ax.set_ylabel("Number of Clusters")
     ax.grid(True, alpha=0.3)
     hep.cms.label(
-        text="Preliminary",
+        "Preliminary",
         data=False,
         rlabel=r"Phase-2 (14 TeV)",
         ax=ax,
@@ -558,7 +564,7 @@ def plot_cluster_size_histogram(
         ax.set_ylabel("Simulated track $p_T$ [GeV]")
         ax.grid(True, alpha=0.3, color="white", linewidth=0.5)
         hep.cms.label(
-            text="Preliminary",
+            "Preliminary",
             data=False,
             rlabel=r"Phase-2 (14 TeV)",
             ax=ax,
@@ -598,7 +604,7 @@ def plot_layer_span_histogram(cluster_layer_spans, output_path, epsilon):
     ax.set_ylim(0, 0.7)
     ax.grid(True, alpha=0.3)
     hep.cms.label(
-        text="Preliminary",
+        "Preliminary",
         data=False,
         rlabel=r"Phase-2 (14 TeV)",
         ax=ax,
@@ -656,7 +662,7 @@ def plot_layer_span_2d(
     ax.set_ylabel("Simulated track $p_T$ [GeV]")
     ax.grid(True, alpha=0.3, color="white", linewidth=0.5)
     hep.cms.label(
-        text="Preliminary",
+        "Preliminary",
         data=False,
         rlabel=r"Phase-2 (14 TeV)",
         ax=ax,

@@ -26,6 +26,22 @@ from helpers import load_config
 from measures import calculate_tracking_metrics, run_inference_and_clustering, plot_cluster_size_histogram, plot_layer_span_histogram, plot_layer_span_2d
 
 
+def _md_majority(sims):
+    """Majority sim and purity for each row of MD sim indices, matching calculate_tracking_metrics:
+    the majority is taken over matched (>= 0) MDs, purity = majority count / all MDs."""
+    sims = np.asarray(sims)
+    n = sims.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=np.int64), np.zeros(0)
+    counts = (sims[:, :, None] == sims[:, None, :]).sum(axis=2)
+    counts = np.where(sims >= 0, counts, 0)
+    best = counts.argmax(axis=1)
+    rows = np.arange(n)
+    best_count = counts[rows, best]
+    maj = np.where(best_count > 0, sims[rows, best], -1).astype(np.int64)
+    return maj, best_count / sims.shape[1]
+
+
 def load_t5_data(root_file_pattern, max_events=None):
     """Load T5 data from ROOT file(s)."""
 
@@ -34,7 +50,8 @@ def load_t5_data(root_file_pattern, max_events=None):
     all_data = {
         't5_pt': [], 't5_eta': [], 'sim_pt': [], 'sim_eta': [], 'sim_q': [],
         'sim_vx': [], 'sim_vy': [], 'sim_vz': [], 'sim_t5IdxAllFrac': [],
-        't5_isFake': [], 't5_isDup': []
+        't5_isFake': [], 't5_isDup': [],
+        't5_majSim': [], 't5_mdPurity': [], 't3_simIdx': [], 't3_pt': []
     }
 
     total_loaded = 0
@@ -67,6 +84,8 @@ def load_t5_data(root_file_pattern, max_events=None):
             ls_mdIdx1 = tree["ls_mdIdx1"].array()
             md_simIdx = tree["md_simIdx"].array()
             t5_isDup = tree["t5_isDuplicate"].array()
+            t3_simIdx = tree["t3_simIdx"].array()
+            t3_pt = tree["t3_pt"].array()
 
             # Get all 8 MD sim indices for each T5
             md_simIdx0 = md_simIdx[ls_mdIdx0[t3_lsIdx0[t5_t3Idx0]]]
@@ -83,6 +102,8 @@ def load_t5_data(root_file_pattern, max_events=None):
                 n_events = max_events - total_loaded
 
             t5_isFake = []
+            t5_majSim = []
+            t5_mdPurity = []
 
             for evt in range(n_events):
                 evt_md_simIdx0 = np.asarray(md_simIdx0[evt])
@@ -111,6 +132,13 @@ def load_t5_data(root_file_pattern, max_events=None):
                 evt_t5_isFake = matching_fraction <= 0.75
                 t5_isFake.append(evt_t5_isFake)
 
+                # Cluster-style matching: treat the T5 as a cluster of its 2 T3s
+                evt_sims = np.stack([evt_md_simIdx0, evt_md_simIdx1, evt_md_simIdx2, evt_md_simIdx3,
+                                     evt_md_simIdx4, evt_md_simIdx5, evt_md_simIdx6, evt_md_simIdx7], axis=1)
+                maj, pur = _md_majority(evt_sims)
+                t5_majSim.append(maj)
+                t5_mdPurity.append(pur)
+
             t5_isFake = ak.Array(t5_isFake)
 
             all_data['t5_pt'].append(t5_pt[:n_events])
@@ -124,6 +152,10 @@ def load_t5_data(root_file_pattern, max_events=None):
             all_data['sim_t5IdxAllFrac'].append(sim_t5IdxAllFrac[:n_events])
             all_data['t5_isFake'].append(t5_isFake)
             all_data['t5_isDup'].append(t5_isDup[:n_events])
+            all_data['t5_majSim'].append(ak.Array(t5_majSim))
+            all_data['t5_mdPurity'].append(ak.Array(t5_mdPurity))
+            all_data['t3_simIdx'].append(t3_simIdx[:n_events])
+            all_data['t3_pt'].append(t3_pt[:n_events])
 
             total_loaded += n_events
 
@@ -290,6 +322,99 @@ def calculate_t5_metrics(t5_data, pt_bins, eta_bins, eta_cut=None, purity_thresh
     }
 
 
+def calculate_t5_metrics_cluster_def(t5_data, pt_bins, eta_bins, eta_cut=None, purity_threshold=0.75, max_t3_pt=2000):
+    """T5 efficiency and duplicate rate using the same definitions as the OC clusters
+    (see calculate_tracking_metrics): each T5 is treated as a cluster of its 2 T3s.
+
+    - A T5 matches a sim if >= purity_threshold of its 8 MD entries belong to the
+      majority (matched) sim.
+    - Denominator: selected sims that have at least one truth-matched T3 (same as the
+      graph's sim_index), with the eta acceptance applied for the pT plots.
+    - Efficiency: sim matched by >= 1 T5. Duplicate rate: sim matched by > 1 T5.
+    """
+    n_bins_pt = len(pt_bins) - 1
+    n_bins_eta = len(eta_bins) - 1
+
+    eff_num_pt = np.zeros(n_bins_pt)
+    eff_den_pt = np.zeros(n_bins_pt)
+    eff_num_eta = np.zeros(n_bins_eta)
+    eff_den_eta = np.zeros(n_bins_eta)
+    dup_num_pt = np.zeros(n_bins_pt)
+    dup_num_eta = np.zeros(n_bins_eta)
+
+    for evt in range(len(t5_data['sim_pt'])):
+        sim_pt = np.asarray(t5_data['sim_pt'][evt])
+        sim_eta = np.asarray(t5_data['sim_eta'][evt])
+        sim_q = np.asarray(t5_data['sim_q'][evt])
+        sim_vx = np.asarray(t5_data['sim_vx'][evt])
+        sim_vy = np.asarray(t5_data['sim_vy'][evt])
+        sim_vz = np.asarray(t5_data['sim_vz'][evt])
+        t3_simIdx = np.asarray(t5_data['t3_simIdx'][evt])
+        t3_pt = np.asarray(t5_data['t3_pt'][evt])
+        maj = np.asarray(t5_data['t5_majSim'][evt], dtype=np.int64)
+        pur = np.asarray(t5_data['t5_mdPurity'][evt])
+        n_sim = len(sim_pt)
+
+        # Sims that appear as the truth label of at least one T3
+        truth = np.unique(t3_simIdx[(t3_simIdx >= 0) & (t3_pt < max_t3_pt)]).astype(np.int64)
+        truth = truth[truth < n_sim]
+
+        sel = (
+            (sim_q[truth] != 0)
+            & (sim_pt[truth] > 0.8)
+            & (np.abs(sim_eta[truth]) < 2.4)
+            & (np.abs(sim_vz[truth]) < 30)
+            & (np.sqrt(sim_vx[truth]**2 + sim_vy[truth]**2) < 2.5)
+        )
+        truth = truth[sel]
+
+        good = (maj >= 0) & (maj < n_sim) & (pur >= purity_threshold)
+        n_matched = np.bincount(maj[good], minlength=n_sim)
+        reco = n_matched[truth] > 0
+        dup = n_matched[truth] > 1
+
+        pts = np.clip(sim_pt[truth], None, pt_bins[-1])
+        etas = sim_eta[truth]
+        if eta_cut is not None:
+            acc = (etas >= eta_cut[0]) & (etas <= eta_cut[1])
+        else:
+            acc = np.ones(len(etas), dtype=bool)
+
+        eff_den_pt += np.histogram(pts[acc], bins=pt_bins)[0]
+        eff_num_pt += np.histogram(pts[acc & reco], bins=pt_bins)[0]
+        dup_num_pt += np.histogram(pts[acc & dup], bins=pt_bins)[0]
+        eff_den_eta += np.histogram(etas, bins=eta_bins)[0]
+        eff_num_eta += np.histogram(etas[reco], bins=eta_bins)[0]
+        dup_num_eta += np.histogram(etas[dup], bins=eta_bins)[0]
+
+    def safe_divide(num, den):
+        return np.divide(num, den, out=np.zeros_like(num, dtype=float), where=den > 0)
+
+    return {
+        'efficiency_pt': safe_divide(eff_num_pt, eff_den_pt),
+        'efficiency_eta': safe_divide(eff_num_eta, eff_den_eta),
+        'duplicate_rate_pt': safe_divide(dup_num_pt, eff_den_pt),
+        'duplicate_rate_eta': safe_divide(dup_num_eta, eff_den_eta),
+        'efficiency_err_pt': clopper_pearson_error(eff_num_pt, eff_den_pt),
+        'efficiency_err_eta': clopper_pearson_error(eff_num_eta, eff_den_eta),
+        'duplicate_rate_err_pt': clopper_pearson_error(dup_num_pt, eff_den_pt),
+        'duplicate_rate_err_eta': clopper_pearson_error(dup_num_eta, eff_den_eta),
+    }
+
+
+def clopper_pearson_error(k, N):
+    k = np.asarray(k)
+    N = np.asarray(N)
+    valid = N > 0
+    _k = np.where(valid, k, 0)
+    _N = np.where(valid, N, 1)
+    eff = np.where(valid, _k / _N, 0)
+    low, high = proportion_confint(_k, _N, method="beta")
+    low = np.where(valid, low, 0)
+    high = np.where(valid, high, 0)
+    return [eff - low, high - eff]
+
+
 def plot_efficiency_fake_rate(pt_bins, eta_bins, metrics_pt, metrics_eta, output_path, epsilon):
     """Plot efficiency and fake rate."""
     pt_centers = (pt_bins[:-1] + pt_bins[1:]) / 2
@@ -298,8 +423,8 @@ def plot_efficiency_fake_rate(pt_bins, eta_bins, metrics_pt, metrics_eta, output
     plots = [
         ('efficiency', 'pt', pt_centers, metrics_pt['efficiency'], metrics_pt['efficiency_err'], 'Simulated track $p_T$ [GeV]', 'Efficiency', 'blue', (0, 1.1)),
         ('fake_rate', 'pt', pt_centers, metrics_pt['fake_rate'], metrics_pt['fake_rate_err'], 'Reconstructed track $p_T$ [GeV]', 'Fake Rate', 'red', None),
-        ('efficiency', 'eta', eta_centers, metrics_eta['efficiency'], metrics_eta['efficiency_err'], 'Simulated track $\eta$', 'Efficiency', 'blue', (0, 1.1)),
-        ('fake_rate', 'eta', eta_centers, metrics_eta['fake_rate'], metrics_eta['fake_rate_err'], 'Reconstructed track $\eta$', 'Fake Rate', 'red', None),
+        ('efficiency', 'eta', eta_centers, metrics_eta['efficiency'], metrics_eta['efficiency_err'], r'Simulated track $\eta$', 'Efficiency', 'blue', (0, 1.1)),
+        ('fake_rate', 'eta', eta_centers, metrics_eta['fake_rate'], metrics_eta['fake_rate_err'], r'Reconstructed track $\eta$', 'Fake Rate', 'red', None),
     ]
 
     for metric_name, var_name, centers, y_data, y_err, xlabel, ylabel, color, ylim in plots:
@@ -310,7 +435,7 @@ def plot_efficiency_fake_rate(pt_bins, eta_bins, metrics_pt, metrics_eta, output
         if ylim is not None:
             ax.set_ylim(ylim)
 
-        hep.cms.label(text="Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
+        hep.cms.label("Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
         ax.text(0.95, 0.95, r"$t\bar{t}$, $\langle\mu\rangle=200$", transform=ax.transAxes, fontsize=20, verticalalignment='top', horizontalalignment='right')
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -328,8 +453,8 @@ def plot_purity_duplicate(pt_bins, eta_bins, metrics_pt, metrics_eta, output_pat
     plots = [
         ('purity', 'pt', pt_centers, metrics_pt['purity'], metrics_pt['purity_err'], 'Simulated track $p_T$ [GeV]', 'Purity', 'green', (0.95, 1.0)),
         ('duplicate_rate', 'pt', pt_centers, metrics_pt['duplicate_rate'], metrics_pt['duplicate_rate_err'], 'Simulated track $p_T$ [GeV]', 'Duplicate Rate', 'purple', (0, 0.2)),
-        ('purity', 'eta', eta_centers, metrics_eta['purity'], metrics_eta['purity_err'], 'Simulated track $\eta$', 'Purity', 'green', (0.95, 1.0)),
-        ('duplicate_rate', 'eta', eta_centers, metrics_eta['duplicate_rate'], metrics_eta['duplicate_rate_err'], 'Simulated track $\eta$', 'Duplicate Rate', 'purple', (0, 0.2)),
+        ('purity', 'eta', eta_centers, metrics_eta['purity'], metrics_eta['purity_err'], r'Simulated track $\eta$', 'Purity', 'green', (0.95, 1.0)),
+        ('duplicate_rate', 'eta', eta_centers, metrics_eta['duplicate_rate'], metrics_eta['duplicate_rate_err'], r'Simulated track $\eta$', 'Duplicate Rate', 'purple', (0, 0.2)),
     ]
 
     for metric_name, var_name, centers, y_data, y_err, xlabel, ylabel, color, ylim in plots:
@@ -340,7 +465,7 @@ def plot_purity_duplicate(pt_bins, eta_bins, metrics_pt, metrics_eta, output_pat
         if ylim is not None:
             ax.set_ylim(ylim)
 
-        hep.cms.label(text="Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
+        hep.cms.label("Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
         ax.text(0.95, 0.95, r"$t\bar{t}$, $\langle\mu\rangle=200$", transform=ax.transAxes, fontsize=20, verticalalignment='top', horizontalalignment='right')
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -350,29 +475,35 @@ def plot_purity_duplicate(pt_bins, eta_bins, metrics_pt, metrics_eta, output_pat
         plt.close()
 
 
-def plot_t5_comparison(pt_bins, eta_bins, model_metrics_pt, model_metrics_eta, t5_metrics, output_path, epsilon):
-    """Plot comparison of transformer and T5 efficiency, fake rate, and duplicate rate."""
+def plot_t5_comparison(pt_bins, eta_bins, model_metrics_pt, model_metrics_eta, t5_metrics, output_path, epsilon,
+                       metrics=('efficiency', 'fake_rate', 'duplicate_rate'), prefix='comparison'):
+    """Plot comparison of transformer and T5 efficiency, fake rate, and duplicate rate.
+    Only the metrics listed in `metrics` are plotted; files are saved as {prefix}_{metric}_{var}_eps_*.png."""
     pt_centers = (pt_bins[:-1] + pt_bins[1:]) / 2
     eta_centers = (eta_bins[:-1] + eta_bins[1:]) / 2
 
-    layer_cut = "($\geq$ 5 layers)"
+    layer_cut = r"($\geq$ 4 layers)"
 
     plots = [
         ('efficiency', 'pt', pt_centers, model_metrics_pt['efficiency'], model_metrics_pt['efficiency_err'],
-         t5_metrics['efficiency_pt'], t5_metrics['efficiency_err_pt'], 'Simulated track $p_T$ [GeV]', rf'Efficiency {layer_cut}', (0, 1.19)),
+         t5_metrics.get('efficiency_pt'), t5_metrics.get('efficiency_err_pt'), 'Simulated track $p_T$ [GeV]', rf'Efficiency {layer_cut}', (0, 1.19)),
         ('fake_rate', 'pt', pt_centers, model_metrics_pt['fake_rate'], model_metrics_pt['fake_rate_err'],
-         t5_metrics['fake_rate_pt'], t5_metrics['fake_rate_err_pt'], 'Reconstructed track $p_T$ [GeV]', rf'Fake rate {layer_cut}', (0, 0.3)),
+         t5_metrics.get('fake_rate_pt'), t5_metrics.get('fake_rate_err_pt'), 'Reconstructed track $p_T$ [GeV]', rf'Fake rate {layer_cut}', (0, 0.3)),
         ('duplicate_rate', 'pt', pt_centers, model_metrics_pt['duplicate_rate'], model_metrics_pt['duplicate_rate_err'],
-         t5_metrics['duplicate_rate_pt'], t5_metrics['duplicate_rate_err_pt'], 'Simulated track $p_T$ [GeV]', rf'Duplicate rate {layer_cut}', (0, 0.2)),
+         t5_metrics.get('duplicate_rate_pt'), t5_metrics.get('duplicate_rate_err_pt'), 'Simulated track $p_T$ [GeV]', rf'Duplicate rate {layer_cut}', (0, 0.2)),
         ('efficiency', 'eta', eta_centers, model_metrics_eta['efficiency'], model_metrics_eta['efficiency_err'],
-         t5_metrics['efficiency_eta'], t5_metrics['efficiency_err_eta'], 'Simulated track $\eta$', rf'Efficiency {layer_cut}', (0, 1.19)),
+         t5_metrics.get('efficiency_eta'), t5_metrics.get('efficiency_err_eta'), r'Simulated track $\eta$', rf'Efficiency {layer_cut}', (0, 1.19)),
         ('fake_rate', 'eta', eta_centers, model_metrics_eta['fake_rate'], model_metrics_eta['fake_rate_err'],
-         t5_metrics['fake_rate_eta'], t5_metrics['fake_rate_err_eta'], 'Reconstructed track $\eta$', rf'Fake rate {layer_cut}', (0, 0.3)),
+         t5_metrics.get('fake_rate_eta'), t5_metrics.get('fake_rate_err_eta'), r'Reconstructed track $\eta$', rf'Fake rate {layer_cut}', (0, 0.3)),
         ('duplicate_rate', 'eta', eta_centers, model_metrics_eta['duplicate_rate'], model_metrics_eta['duplicate_rate_err'],
-         t5_metrics['duplicate_rate_eta'], t5_metrics['duplicate_rate_err_eta'], 'Simulated track $\eta$', rf'Duplicate rate {layer_cut}', (0, 0.2)),
+         t5_metrics.get('duplicate_rate_eta'), t5_metrics.get('duplicate_rate_err_eta'), r'Simulated track $\eta$', rf'Duplicate rate {layer_cut}', (0, 0.2)),
     ]
 
     for metric_name, var_name, centers, m_y, m_err, t_y, t_err, xlabel, ylabel, ylim in plots:
+        if metric_name not in metrics:
+            continue
+        if metric_name == 'duplicate_rate':
+            ylim = (0, max(ylim[1], 1.15 * max(np.max(m_y), np.max(t_y))))
         fig, ax = plt.subplots(figsize=(12, 8))
 
         ax.errorbar(centers, m_y, yerr=m_err, fmt='o', color='blue', label='Transformer OC', capsize=3, markersize=5)
@@ -383,13 +514,13 @@ def plot_t5_comparison(pt_bins, eta_bins, model_metrics_pt, model_metrics_eta, t
         if ylim is not None:
             ax.set_ylim(ylim)
 
-        hep.cms.label(text="Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
+        hep.cms.label("Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
         ax.text(0.95, 0.95, r"$t\bar{t}$, $\langle\mu\rangle=200$", transform=ax.transAxes, fontsize=20, verticalalignment='top', horizontalalignment='right')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(f"{output_path}/comparison_{metric_name}_{var_name}_eps_{epsilon:.3f}.png", dpi=300, bbox_inches='tight')
+        plt.savefig(f"{output_path}/{prefix}_{metric_name}_{var_name}_eps_{epsilon:.3f}.png", dpi=300, bbox_inches='tight')
         plt.close()
 
 
@@ -397,10 +528,11 @@ def main():
     argparser = ArgumentParser()
     argparser.add_argument('--config', type=str, default='./config.yaml', help='Path to the config file (YAML)')
     argparser.add_argument('--output', type=str, help='Path to the trained model file')
+    argparser.add_argument('--plot-output', type=str, help='Path to the plot output folder')
     argparser.add_argument('--epsilon', type=float, default=None, help='DBSCAN epsilon parameter (overrides config)')
     argparser.add_argument('--n-events', type=int, default=-1, help='Number of events to process (-1 for all)')
     argparser.add_argument('--t5', action='store_true', help='Include T5 comparison plots')
-    argparser.add_argument('--t5-file', type=str, default="/home/users/aaarora/phys/tracking/lst/lstod/CMSSW_15_1_0_pre2/src/RecoTracker/LSTCore/standalone/output_pu200_all/*.root", help='Path or wildcard to ROOT file(s) with T5 data')
+    argparser.add_argument('--t5-file', type=str, default="/home/users/jachisma/CMSSW_15_1_0_pre2/src/RecoTracker/LSTCore/standalone/output_pu200_all/*.root", help='Path or wildcard to ROOT file(s) with T5 data')
     args = argparser.parse_args()
 
     config = load_config(args.config)
@@ -435,7 +567,7 @@ def main():
 
     model.to(device)
 
-    if ".pt" in args.output:
+    if ".pt" in args.output or ".ckpt" in args.output:
         output = args.output
     else:
         output = args.output + '/final_model.ckpt'
@@ -611,10 +743,10 @@ def main():
     }
 
     # Plot efficiency and fake rate
-    plot_efficiency_fake_rate(pt_bins, eta_bins, metrics_pt, metrics_eta, args.output, epsilon)
+    plot_efficiency_fake_rate(pt_bins, eta_bins, metrics_pt, metrics_eta, args.plot_output, epsilon)
 
     # Plot purity and duplicate rate
-    plot_purity_duplicate(pt_bins, eta_bins, metrics_pt, metrics_eta, args.output, epsilon)
+    plot_purity_duplicate(pt_bins, eta_bins, metrics_pt, metrics_eta, args.plot_output, epsilon)
 
     # Load and plot T5 comparison if requested
     if args.t5:
@@ -632,10 +764,15 @@ def main():
         t5_metrics = calculate_t5_metrics(t5_data, pt_bins, eta_bins, eta_cut=eta_cut, purity_threshold=purity_threshold)
 
         # Plot comparison
-        plot_t5_comparison(pt_bins, eta_bins, metrics_pt, metrics_eta, t5_metrics, args.output, epsilon)
+        plot_t5_comparison(pt_bins, eta_bins, metrics_pt, metrics_eta, t5_metrics, args.plot_output, epsilon)
+
+        # Same comparison, but with T5 efficiency/duplicate rate defined like the clusters
+        t5_metrics_cl = calculate_t5_metrics_cluster_def(t5_data, pt_bins, eta_bins, eta_cut=eta_cut, purity_threshold=purity_threshold)
+        plot_t5_comparison(pt_bins, eta_bins, metrics_pt, metrics_eta, t5_metrics_cl, args.plot_output, epsilon,
+                           metrics=('efficiency', 'duplicate_rate'), prefix='comparison_clusterdef')
 
     if all_cluster_sizes:
-        plot_cluster_size_histogram(all_cluster_sizes, pt_bins, eta_bins, args.output, epsilon, cluster_data=all_cluster_data)
+        plot_cluster_size_histogram(all_cluster_sizes, pt_bins, eta_bins, args.plot_output, epsilon, cluster_data=all_cluster_data)
         print(f"\nCluster size statistics:")
         print(f"  Total clusters: {len(all_cluster_sizes)}")
         print(f"  Mean cluster size: {np.mean(all_cluster_sizes):.2f}")
@@ -643,8 +780,8 @@ def main():
         print(f"  Min/Max cluster size: {min(all_cluster_sizes)}/{max(all_cluster_sizes)}")
 
     if all_cluster_layer_spans:
-        plot_layer_span_histogram(all_cluster_layer_spans, args.output, epsilon)
-        plot_layer_span_2d(all_cluster_data, all_cluster_layer_spans, pt_bins, eta_bins, args.output, epsilon)
+        plot_layer_span_histogram(all_cluster_layer_spans, args.plot_output, epsilon)
+        plot_layer_span_2d(all_cluster_data, all_cluster_layer_spans, pt_bins, eta_bins, args.plot_output, epsilon)
         print(f"\nLayer span statistics:")
         print(f"  Mean layer span: {np.mean(all_cluster_layer_spans):.2f}")
         print(f"  Median layer span: {np.median(all_cluster_layer_spans):.0f}")
@@ -668,8 +805,11 @@ def main():
         print(f"\nT5 Performance (mean over non-zero bins):")
         print(f"  Efficiency: {np.mean(t5_metrics['efficiency_pt'][t5_metrics['efficiency_pt'] > 0]):.3f}")
         print(f"  Fake Rate: {np.mean(t5_metrics['fake_rate_pt'][t5_metrics['fake_rate_pt'] > 0]):.3f}")
+        print(f"\nT5 Performance, cluster definitions (mean over non-zero bins):")
+        print(f"  Efficiency: {np.mean(t5_metrics_cl['efficiency_pt'][t5_metrics_cl['efficiency_pt'] > 0]):.3f}")
+        print(f"  Duplicate Rate: {np.mean(t5_metrics_cl['duplicate_rate_pt'][t5_metrics_cl['duplicate_rate_pt'] > 0]):.3f}")
 
-    print(f"\nPlots saved to: {args.output}/")
+    print(f"\nPlots saved to: {args.plot_output}/")
 
 if __name__ == "__main__":
     main()
