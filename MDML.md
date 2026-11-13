@@ -298,10 +298,29 @@ helix (sim vz, η, φ, q/pT): "off helix" = |Δφ| > 0.1 or |Δz| > 15 cm (media
 
 #### Extrapolation walkthrough (`studies/md_extrapolation_demo.py`, 2026-11-12)
 
-Standalone script on one LSTNtuple (reads nothing else from the repo): one random MD of interest per layer per
-event (true OT MD of a prompt hard-scatter sim, pT ≥ 0.8 GeV), 100 MDs from 10 events, 517 (MD, layer) pairs with a
-sibling. Per MD: one pdf with an x-y view and one (φ, η) panel per layer; `summary.pdf`; key=value log
-(`md_plots/extrapolation/`, and `md_plots/extrapolation_detailed/` with `--detailed`, not in git).
+Standalone script on one LSTNtuple (reads nothing else from the repo). MDs of interest: true OT MDs of a prompt
+hard-scatter sim with pT ≥ 0.8 GeV and a sibling on another layer. Per MD: one pdf with an x-y view and one (φ, η)
+panel per layer; `summary.pdf`; key=value log (`md_plots/extrapolation/`, not in git).
+
+Since 2026-11-13 the script draws `--n_mds` (default 100) MDs at random from one event (`--tree_entry`, default
+0), so layers appear in proportion to their candidates (entry 0: 374 candidates, endcap ~23%; 100 draws cover all
+11 layers 97% of the time), and uses a fixed `GEOMETRY` (layer extents over 100 events, `--dump_geometry`). Entry 0,
+100 MDs, 504 (MD, layer) pairs with a sibling (k median / 90%):
+
+  | Centre | k median | k 90% | Better / worse than helix |
+  |---|---|---|---|
+  | own | 15 | 102 | (helix better in 383, worse in 41) |
+  | helix | 2 | 10 | |
+  | helix sim q/pT (`--detailed`) | 1 | 6 | 135 / 52 |
+  | helix sim vz (`--detailed`) | 1 | 6 | 177 / 54 |
+  | oracle | 1 | 2 | 235 / 27 |
+
+  Same picture as the 10-event sample below: helix is most of the gain over own, the oracle closes the rest, and the
+  vertex z beats the sim's q/pT by pair counts (here both reach 6 at 90%). own's k is larger than below because the
+  sample differs (one event; 132 pairs at 0.8–1 GeV vs 73), not because own changed.
+
+The rest of this section is the 2026-11-12 sample: one random MD per layer per event, 100 MDs from 10 events, 517
+(MD, layer) pairs with a sibling, per-event layer extents.
 
 - Checks: `md_pt` = rt_anchor · K / sin(`md_dphichange`) (signed: q/pT = −1 / `md_pt`), and `md_eta`, `md_phi` are
   the anchor hit's direction from the origin. Agree to < 1e-4 on every OT MD of 10 events.
