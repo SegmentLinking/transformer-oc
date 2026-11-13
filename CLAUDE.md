@@ -69,6 +69,11 @@ cd data && python3 test_t3_processing.py
   (`[t.eta() for t in tracks]`), but not `[_.func() for _ in container]` or a single letter for our own dict
   records. `_` is fine for a value that is really discarded. Library keyword arguments (matplotlib's `s=`) and math
   symbols in docstrings are exempt.
+- When a dict is really a fixed bundle of named fields (one object per MD, per track, per (MD, layer) pair), make it
+  a small class, usually a `@dataclass`, so code reads `md.md_layer` instead of `info["md_layer"]` and type hints
+  say `list[ExtrapolationToLayer]` instead of `list[dict]`. Name the class for what it is, not `Record` or `Info`,
+  and keep the LSTNtuple prefixes on its fields (`md_*`, `sim_*`). Plain dicts stay fine for real mappings, such as
+  per-center values keyed by name.
 - Save plots as vector graphics (pdf), not raster (png). Use raster only when a plot has so many points that the pdf would exceed about 10 MB (or rasterize just the dense layer with `rasterized=True`).
 
 ## Gotchas
