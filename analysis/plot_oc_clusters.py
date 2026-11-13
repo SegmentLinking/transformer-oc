@@ -11,6 +11,9 @@ Two kinds of output:
      positions and the sim hits.
      If the LST ntuple was written with --md --ls --t3, every T3 of the cluster is drawn as a line through the
      anchor hits of its three mini-doublets.
+  3. event<E>_cluster<C>_simidx.png: the same clusters, with every MD (at its anchor hit) labelled with md_simIdx
+     (top row) and every hit labelled with the sim idxs of its sim hits (bottom row); -1 when not matched.
+     The MD row needs the --md --ls --t3 branches and md_simIdx. Without --tracking only the MD row is drawn.
 
 Layers: B1-B6 barrel, E1-E5 endcap disks (the numbering of oc_nLayers: barrel 1-6, endcap 7-11).
 
@@ -102,6 +105,30 @@ def plot_distributions(tree, n_events, path):
 
 
 # ----------------------------------------------------------------------------------------------- cluster display
+def load_t3_anchors(tree, event):
+    """MD anchor positions of every T3 (and md_simIdx), or None without the --md --ls --t3 branches."""
+    # T3 segments need T3 -> LS -> MD -> anchor hit position, i.e. the --md --ls --t3 branches
+    t3_branches = ["oc_t3Idx", "t3_lsIdx0", "t3_lsIdx1", "ls_mdIdx0", "ls_mdIdx1", "md_anchor_x", "md_anchor_y", "md_anchor_z"]
+    if not all(name in tree.keys() for name in t3_branches):
+        print("no T3 segments in the displays: the LST ntuple was not written with --md --ls --t3")
+        return None
+    t3 = tree.arrays(t3_branches, entry_start=event, entry_stop=event + 1)[0]
+    ls0, ls1 = ak.to_numpy(t3["t3_lsIdx0"]), ak.to_numpy(t3["t3_lsIdx1"])
+    md0, md1 = ak.to_numpy(t3["ls_mdIdx0"]), ak.to_numpy(t3["ls_mdIdx1"])
+    mds = np.stack([md0[ls0], md1[ls0], md1[ls1]], axis=1)  # [nT3, 3]
+    md_xyz = {c: ak.to_numpy(t3[f"md_anchor_{c}"]) for c in "xyz"}
+    x, y, z = (md_xyz[c][mds] for c in "xyz")
+    t3_anchors = {"x": x, "y": y, "z": z, "r": np.hypot(x, y), "oc_t3Idx": t3["oc_t3Idx"], "mds": mds,
+                  "md_x": md_xyz["x"], "md_y": md_xyz["y"], "md_z": md_xyz["z"],
+                  "md_r": np.hypot(md_xyz["x"], md_xyz["y"])}
+    if "md_simIdx" in tree.keys():
+        t3_anchors["md_simIdx"] = ak.to_numpy(tree.arrays(["md_simIdx"], entry_start=event,
+                                                          entry_stop=event + 1)[0]["md_simIdx"])
+    else:
+        print("no MD sim labels: the LST ntuple has no md_simIdx branch")
+    return t3_anchors
+
+
 def load_event(tree, tracking, event, tracking_entry):
     out = tree.arrays(
         ["oc_hitIdxs", "oc_nT3s", "oc_nLayers", "oc_pt", "oc_eta", "oc_phi", "oc_isFake", "oc_simIdx", "oc_pMatched",
@@ -112,18 +139,7 @@ def load_event(tree, tracking, event, tracking_entry):
         ["ph2_x", "ph2_y", "ph2_z", "ph2_subdet", "ph2_layer", "ph2_simHitIdx", "simhit_simTrkIdx", "sim_pt", "sim_eta"],
         entry_start=tracking_entry, entry_stop=tracking_entry + 1,
     )[0]
-    # T3 segments need T3 -> LS -> MD -> anchor hit position, i.e. the --md --ls --t3 branches
-    t3_branches = ["oc_t3Idx", "t3_lsIdx0", "t3_lsIdx1", "ls_mdIdx0", "ls_mdIdx1", "md_anchor_x", "md_anchor_y", "md_anchor_z"]
-    t3_anchors = None
-    if all(name in tree.keys() for name in t3_branches):
-        t3 = tree.arrays(t3_branches, entry_start=event, entry_stop=event + 1)[0]
-        ls0, ls1 = ak.to_numpy(t3["t3_lsIdx0"]), ak.to_numpy(t3["t3_lsIdx1"])
-        md0, md1 = ak.to_numpy(t3["ls_mdIdx0"]), ak.to_numpy(t3["ls_mdIdx1"])
-        mds = np.stack([md0[ls0], md1[ls0], md1[ls1]], axis=1)  # [nT3, 3]
-        x, y, z = (ak.to_numpy(t3[f"md_anchor_{c}"])[mds] for c in "xyz")
-        t3_anchors = {"x": x, "y": y, "z": z, "r": np.hypot(x, y), "oc_t3Idx": t3["oc_t3Idx"]}
-    else:
-        print("no T3 segments in the displays: the LST ntuple was not written with --md --ls --t3")
+    t3_anchors = load_t3_anchors(tree, event)
     n_sim = len(out["sim_pt"])
     if not np.array_equal(ak.to_numpy(out["sim_pt"]), ak.to_numpy(inp["sim_pt"])[:n_sim]):
         sys.exit(f"tracking ntuple entry {tracking_entry} is not the event of LST ntuple entry {event}")
@@ -237,6 +253,104 @@ def plot_cluster(event, cluster, out, inp, hits, hit_sims, sim_hits, t3_anchors,
     return truth, layers
 
 
+SIM_COLOURS = ["#2a78d6", "#eb6834", "#2f9e6e", "#8b5cd6", "#d64f8b", "#b58a1a", "#1aa3b5", "#6b7d2a"]
+
+
+def sim_colour(sims, palette):
+    """Colour of a hit/MD from its sim idxs: one colour per sim idx in the cluster, grey for -1 or several."""
+    if len(sims) != 1 or sims[0] < 0:
+        return INK_SECONDARY if len(sims) > 1 else CONTEXT
+    return palette[sims[0]]
+
+
+def plot_cluster_sim_labels(event, cluster, out, hits, hit_sims, t3_anchors, path):
+    """Cluster MDs (top row) and cluster hits (bottom row), each labelled with its matched sim idxs (-1: none).
+    Without the tracking ntuple (hits None) only the MD row is drawn, over the other MDs of the event."""
+    cluster_hits = np.asarray(out["oc_hitIdxs"][cluster])
+    hit_labels = []
+    rows = []
+    if hits is not None:
+        hit_labels = [sorted(hit_sims[hit]) or [-1] for hit in cluster_hits]
+        rows.append(("hits", hits["x"][cluster_hits], hits["y"][cluster_hits], hits["z"][cluster_hits],
+                     hits["r"][cluster_hits], hit_labels))
+    else:
+        hits = {c: t3_anchors[f"md_{c}"] for c in "xyzr"}
+        hits["phi"] = np.arctan2(hits["y"], hits["x"])
+    have_mds = t3_anchors is not None and "md_simIdx" in t3_anchors
+    if have_mds:
+        mds = np.unique(t3_anchors["mds"][np.asarray(t3_anchors["oc_t3Idx"][cluster], dtype=int)])
+        md_labels = [[max(int(sim), -1)] for sim in t3_anchors["md_simIdx"][mds]]  # unmatched MDs are -999
+        rows.insert(0, ("MDs (anchor hit)", t3_anchors["md_x"][mds], t3_anchors["md_y"][mds], t3_anchors["md_z"][mds],
+                     t3_anchors["md_r"][mds], md_labels))
+
+    # one colour per sim idx that is the only match of some hit/MD; the others are only in the text labels
+    sims = sorted({ls[0] for *_, labels in rows for ls in labels if len(ls) == 1} - {-1})
+    palette = {sim: SIM_COLOURS[i % len(SIM_COLOURS)] for i, sim in enumerate(sims)}
+
+    all_x = np.concatenate([r[1] for r in rows]); all_y = np.concatenate([r[2] for r in rows])
+    all_z = np.concatenate([r[3] for r in rows]); all_r = np.concatenate([r[4] for r in rows])
+    half = 0.5 * max(np.ptp(all_x), np.ptp(all_y)) + 12
+    x_mid, y_mid = 0.5 * (all_x.min() + all_x.max()), 0.5 * (all_y.min() + all_y.max())
+    z_lim = (all_z.min() - 25, all_z.max() + 25)
+    r_lim = (max(0, all_r.min() - 15), min(118, all_r.max() + 15))
+    phi0 = np.arctan2(np.mean(all_y), np.mean(all_x))
+    dphi = np.abs(np.arctan2(np.sin(hits["phi"] - phi0), np.cos(hits["phi"] - phi0)))
+
+    fig, axes = plt.subplots(len(rows), 2, figsize=(13, 6 * len(rows)), facecolor=SURFACE, squeeze=False)
+    for (name, x, y, z, r, labels), (ax_xy, ax_rz) in zip(rows, axes):
+        coords = {"x": x, "y": y, "z": z, "r": r}
+        colours = [sim_colour(ls, palette) for ls in labels]
+        for ax, (h, v), context in (
+            (ax_xy, ("x", "y"), (hits["z"] > z_lim[0]) & (hits["z"] < z_lim[1])),
+            (ax_rz, ("z", "r"), dphi < 0.15),
+        ):
+            style_axes(ax)
+            ax.scatter(hits[h][context], hits[v][context], s=3, color=CONTEXT, linewidths=0, zorder=1, rasterized=True)
+            if t3_anchors is not None:
+                for t3 in t3_anchors["oc_t3Idx"][cluster]:
+                    ax.plot(t3_anchors[h][t3], t3_anchors[v][t3], color=T3_LINE, linewidth=1.0, alpha=0.35,
+                            zorder=2, solid_capstyle="round")
+            ax.scatter(coords[h], coords[v], s=48, color=colours, edgecolors=INK, linewidths=0.6, zorder=4)
+            # stack the labels of points that nearly coincide (e.g. the two hits of an MD)
+            span = max(np.ptp(coords[h]), np.ptp(coords[v]), 1.0)
+            placed = []
+            for xi, yi, ls in zip(coords[h], coords[v], labels):
+                n_near = sum(np.hypot(xi - px, yi - py) < 0.03 * span for px, py in placed)
+                placed.append((xi, yi))
+                ax.annotate(",".join(str(s) for s in ls), (xi, yi), xytext=(6, 4 - 9 * n_near),
+                            textcoords="offset points", color=INK, fontsize=7.5, zorder=5)
+            ax.set_xlabel(f"{h} [cm]", color=INK_SECONDARY, fontsize=11)
+            ax.set_ylabel(f"{v} [cm]", color=INK_SECONDARY, fontsize=11)
+            ax.set_title(f"{name}, {h}-{v}" if h == "x" else f"{name}, r-z", loc="left", color=INK, fontsize=11)
+        ax_xy.set_xlim(x_mid - half, x_mid + half)
+        ax_xy.set_ylim(y_mid - half, y_mid + half)
+        ax_xy.set_aspect("equal", adjustable="box")
+        ax_rz.set_xlim(*z_lim)
+        ax_rz.set_ylim(*r_lim)
+
+    handles = [Line2D([], [], marker="o", color="none", markerfacecolor=palette[s], markeredgecolor=INK,
+                      markersize=8, label=f"sim {s}") for s in sims]
+    handles += [Line2D([], [], marker="o", color="none", markerfacecolor=CONTEXT, markeredgecolor=INK,
+                       markersize=8, label="-1 (no sim match)")]
+    if any(len(ls) > 1 for ls in hit_labels):
+        handles.append(Line2D([], [], marker="o", color="none", markerfacecolor=INK_SECONDARY, markeredgecolor=INK,
+                              markersize=8, label="several sims"))
+    legend = fig.legend(handles=handles, frameon=False, fontsize=9.5, ncol=min(len(handles), 5), loc="upper right",
+                        bbox_to_anchor=(0.99, 1.0))
+    for text in legend.get_texts():
+        text.set_color(INK)
+    n_md = f", {len(rows[0][1])} MDs" if have_mds else ""
+    fig.suptitle(f"Event {event}, cluster {cluster}: sim idxs", x=0.05, y=0.995, ha="left", color=INK, fontsize=14,
+                 fontweight="bold")
+    fig.text(0.05, 0.975 if len(rows) > 1 else 0.93,
+             f"{out['oc_nT3s'][cluster]} T3s, {len(cluster_hits)} hits{n_md}; labels are matched sim idxs "
+             f"({'hits: from sim hits, ' if hit_labels else ''}MDs: md_simIdx; -1 = not matched)",
+             ha="left", va="top", color=INK_SECONDARY, fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.955 if len(rows) > 1 else 0.9))
+    fig.savefig(path, dpi=140, facecolor=SURFACE)
+    plt.close(fig)
+
+
 def pick_clusters(out, how, n, seed):
     n_clusters = len(out["oc_nT3s"])
     fake = ak.to_numpy(out["oc_isFake"]) == 1
@@ -280,6 +394,18 @@ def main():
             path = os.path.join(args.output, f"event{args.event}_cluster{cluster}.png")
             truth, layers = plot_cluster(args.event, int(cluster), out, inp, hits, hit_sims, sim_hits, t3_anchors, path)
             print(f"  cluster {cluster}: {len(out['oc_hitIdxs'][cluster])} hits, {len(layers)} layers; {truth}")
+            plot_cluster_sim_labels(args.event, int(cluster), out, hits, hit_sims, t3_anchors,
+                                    os.path.join(args.output, f"event{args.event}_cluster{cluster}_simidx.png"))
+    else:
+        # no tracking ntuple: only the MD sim-idx plots, which need the --md --ls --t3 branches and md_simIdx
+        t3_anchors = load_t3_anchors(tree, args.event)
+        if t3_anchors is not None and "md_simIdx" in t3_anchors:
+            out = tree.arrays(["oc_hitIdxs", "oc_nT3s", "oc_isFake"], entry_start=args.event, entry_stop=args.event + 1)[0]
+            clusters = args.clusters if args.clusters is not None else pick_clusters(out, args.pick, args.n, args.seed)
+            print(f"\nMD sim-idx displays, event {args.event} (no --tracking, so no hits): clusters {list(map(int, clusters))}")
+            for cluster in clusters:
+                plot_cluster_sim_labels(args.event, int(cluster), out, None, None, t3_anchors,
+                                        os.path.join(args.output, f"event{args.event}_cluster{cluster}_simidx.png"))
     print(f"\nplots in {args.output}/")
 
 
