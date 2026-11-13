@@ -14,7 +14,7 @@ import random
 
 from constants import SIM_VARS, T3_VARS, T3_HIT_SIMIDX, T3_HIT_LAYER, T3_PMATCHED, LS_INDEX, LS_VARS, MD_VARS, MD_INDEX
 from constants import TARGET, FAKE_TARGET, LAYER_INFO, MD_SIMIDX, ALL_COLUMNS, MIN_T3_PT, MAX_T3_PT, UNMATCHED
-from constants import N_T3_MDS
+from constants import N_T3_MDS, T3_HIT_DETID, T3_HIT_XYZ
 
 
 class GraphBuilder:
@@ -136,7 +136,17 @@ class GraphBuilder:
             if n_mismatch > 0:
                 raise ValueError(f"Mismatch between calculated pMatched and ntuple pMatched for graph {idx}")
             hit_simIdx = hit_simIdx[pt_mask]
-            hit_layer = ak.to_dataframe(event_data[T3_HIT_LAYER])[pt_mask].values
+            hit_layer_all = ak.to_dataframe(event_data[T3_HIT_LAYER]).values
+            hit_layer = hit_layer_all[pt_mask]
+
+            # Built from all T3s, so the table covers every hit in the event; hit_id is cut like the other per-T3 fields
+            hit_id, hit_sim_candidates = build_hit_table(
+                detId=ak.to_dataframe(event_data[T3_HIT_DETID]).values,
+                xyz=ak.to_dataframe(event_data[T3_HIT_XYZ]).values.reshape(-1, 3, 6).transpose(0, 2, 1),
+                sim_lists=event_data[T3_HIT_SIMIDX],
+                layer=hit_layer_all,
+            )
+            hit_id = hit_id[pt_mask]
 
             target_np = ak.to_dataframe(event_data[TARGET])[pt_mask].values
 
@@ -148,6 +158,7 @@ class GraphBuilder:
                 md_simIdx = self._to_tensor(md_simIdx[fake_mask])
                 hit_simIdx = self._to_tensor(hit_simIdx[fake_mask])
                 hit_layer = self._to_tensor(hit_layer[fake_mask])
+                hit_id = self._to_tensor(hit_id[fake_mask], dtype=torch.long)
 
             else:
                 node_features_np = np.concatenate([t3_features, ls_features, md_features], axis=1)
@@ -157,6 +168,7 @@ class GraphBuilder:
                 md_simIdx = self._to_tensor(md_simIdx)
                 hit_simIdx = self._to_tensor(hit_simIdx)
                 hit_layer = self._to_tensor(hit_layer)
+                hit_id = self._to_tensor(hit_id, dtype=torch.long)
 
             node_features = self._to_tensor(node_features_np)
             sim_features = self._to_tensor(ak.to_dataframe(event_data[SIM_VARS]).values)
@@ -164,7 +176,8 @@ class GraphBuilder:
             graph = Data(x=node_features,
                          sim_index=target_flat, sim_features=sim_features,
                          md_layer=md_layer, md_simIdx=md_simIdx,
-                         hit_layer=hit_layer, hit_simIdx=hit_simIdx)
+                         hit_layer=hit_layer, hit_simIdx=hit_simIdx, hit_id=hit_id,
+                         hit_sim_candidates=self._to_tensor(hit_sim_candidates, dtype=torch.long))
             if args.debug:
                 print(graph)
                 return
@@ -245,6 +258,49 @@ def unique_t3_md_indices(md_idx: np.ndarray) -> np.ndarray:
     if not np.array_equal(md_idx[:, 0, 1], md_idx[:, 1, 0]):
         raise ValueError("Found a T3 whose two LSs do not share their middle MD")
     return np.stack([md_idx[:, 0, 0], md_idx[:, 0, 1], md_idx[:, 1, 1]], axis=1)
+
+
+def build_hit_table(detId: np.ndarray, xyz: np.ndarray, sim_lists: ak.Array, layer: np.ndarray):
+    """
+    Give every distinct hit of the event an id, and list the sim tracks of each distinct hit.
+
+    Inputs, for one event: detId (n_t3, 6), xyz (n_t3, 6, 3) float32 hit positions, sim_lists with fields
+    T3_HIT_SIMIDX of shape (n_t3, var), and layer (n_t3, 6).
+    Outputs: hit_id (n_t3, 6) int64 in [0, n_hits), and hit_sim_candidates (n_hits, K) int64.
+
+    A hit is identified by (detId, x, y, z), compared bit for bit, since the ntuple has no hit index.
+    The candidates of a hit are its distinct non-negative sim indices, largest first, padded with UNMATCHED.
+    This is what LST's matchedSimTrkIdxsAndFracsFromCounts counts: a hit counts towards every sim track in its row.
+
+    Raises ValueError if two slots with the same id disagree on their sim tracks or layer, which would mean
+    the (detId, x, y, z) key is not unique.
+    """
+    n_t3 = detId.shape[0]
+    xyz_bits = np.ascontiguousarray(xyz, dtype=np.float32).view(np.int32).astype(np.int64)
+    keys = np.concatenate([detId.astype(np.int64)[:, :, None], xyz_bits], axis=2).reshape(-1, 4)
+    _, first_slot, hit_id = np.unique(keys, axis=0, return_index=True, return_inverse=True)
+    hit_id = hit_id.reshape(n_t3, 6)
+
+    # sim lists of every slot, row-major (t3, slot), as one padded array: distinct, non-negative, largest first
+    columns = [sim_lists[branch][0] for branch in T3_HIT_SIMIDX]  # [0] removes the event dimension
+    slots = ak.flatten(ak.concatenate([col[:, None] for col in columns], axis=1), axis=1)
+    slots = slots[slots >= 0]
+    max_len = int(ak.max(ak.num(slots), initial=1))
+    padded = ak.to_numpy(ak.fill_none(ak.pad_none(slots, max_len, clip=True), UNMATCHED)).astype(np.int64)
+    padded = -np.sort(-padded, axis=1)
+    repeated = np.zeros_like(padded, dtype=bool)
+    repeated[:, 1:] = padded[:, 1:] == padded[:, :-1]
+    padded[repeated] = UNMATCHED
+    padded = -np.sort(-padded, axis=1)
+    width = max(1, int((padded != UNMATCHED).sum(axis=1).max()))
+    padded = padded[:, :width]
+
+    hit_sim_candidates = padded[first_slot]
+    if not np.array_equal(hit_sim_candidates[hit_id.ravel()], padded):
+        raise ValueError("Slots with the same (detId, x, y, z) have different sim tracks")
+    if not np.array_equal(layer.ravel()[first_slot][hit_id.ravel()], layer.ravel()):
+        raise ValueError("Slots with the same (detId, x, y, z) have different layers")
+    return hit_id, hit_sim_candidates
 
 
 def convert_hit_simIdx_to_array(t3_hit_simIdx: ak.Array) -> np.ndarray:
