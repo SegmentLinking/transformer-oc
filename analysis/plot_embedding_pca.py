@@ -30,6 +30,7 @@ Selections:
 
 Output, in --output-dir:
   explained_variance.pdf: fraction of embedding variance in each component
+  components.pdf: overlaid 1D histograms of the components
   correlation.pdf: Pearson correlation of each component with each feature. This
                    only catches linear relationships (e.g. not phi wrap-around), so
                    it is a guide to the 2D histograms, not a replacement for them.
@@ -522,7 +523,10 @@ def write_pca_plots(
     logz: bool,
     output_dir: str,
 ) -> None:
-    """The explained variance, the correlations, and the pca_<k>.pdf pages."""
+    """
+    The explained variance, the component histograms, the correlations, and the
+    pca_<k>.pdf pages.
+    """
     n_pca = components.shape[1]
     for k, fraction in enumerate(explained[:n_pca]):
         print(
@@ -533,6 +537,14 @@ def write_pca_plots(
     save(fig=fig, path=os.path.join(output_dir, "explained_variance.pdf"))
     if n_pca == 0:
         return
+
+    fig = plot_component_histograms(
+        components=components,
+        explained=explained,
+        quantile=quantile,
+        n_bins=n_bins,
+    )
+    save(fig=fig, path=os.path.join(output_dir, "components.pdf"))
 
     correlation = correlate(components=components, features=features)
     fig = plot_correlation(correlation=correlation, names=names)
@@ -812,6 +824,29 @@ def plot_explained_variance(
     ax.set_ylabel("Fraction of embedding variance")
     ax.set_ylim(0, VARIANCE_PLOT_YMAX)
     ax.legend(loc="center right")
+    return fig
+
+
+def plot_component_histograms(
+    components: np.ndarray,
+    explained: np.ndarray,
+    quantile: float,
+    n_bins: int,
+) -> Figure:
+    fig, ax = plt.subplots()
+    # Bins shared by all components, so their spreads can be compared
+    edges = quantile_edges(values=components, quantile=quantile, n_bins=n_bins)
+    for k in range(components.shape[1]):
+        ax.hist(
+            components[:, k],
+            bins=edges,
+            histtype="step",
+            label=f"PCA {k} ({explained[k]:.1%})",
+            linewidth=2,
+        )
+    ax.set_xlabel("PCA component value")
+    ax.set_ylabel(COUNTS_LABEL)
+    ax.legend()
     return fig
 
 
