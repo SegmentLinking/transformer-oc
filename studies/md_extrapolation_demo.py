@@ -49,12 +49,13 @@ from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
 from pprint import pprint
 
+import numpy as np
 import awkward as ak
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
+from matplotlib.colors import to_rgba
 from matplotlib.backends.backend_pdf import PdfPages
 import uproot
 
@@ -79,12 +80,12 @@ PS_TYPE = 1
 SALIENT_CENTERS = ["own", "helix", "oracle"]
 DETAILED_CENTERS = ["own", "helix", "helix_sim_qoverpt", "helix_sim_vz", "oracle"]
 # Short names in plot titles and legends
-CENTER_LABELS = {
-    "own": "own",
-    "helix": "helix",
-    "helix_sim_qoverpt": "sim q/pT",
-    "helix_sim_vz": "sim vz",
-    "oracle": "oracle",
+LEGEND_LABELS = {
+    "own": r"MD $\eta$, $\phi$",
+    "helix": "MD helix",
+    "helix_sim_qoverpt": "MD helix, sim. q/pT",
+    "helix_sim_vz": "MD helix, sim. vz",
+    "oracle": "MD sim. helix",
 }
 # Pairs of centers compared in the [summary] log, when both are shown: (center, reference)
 COMPARISONS = [
@@ -109,11 +110,11 @@ COLORS = {
 }
 BACKGROUND_COLOR = "#a0a0a0"
 LINESTYLES = {
-    "own": "--",
+    "own": "-",
     "helix": "-",
     "helix_sim_qoverpt": ":",
     "helix_sim_vz": (0, (5, 1, 1, 1, 1, 1)),
-    "oracle": "-.",
+    "oracle": "-",
 }
 # Log-spaced bin edges at half-integers, so each bin holds whole values of k
 K_BINS = np.concatenate([[0.5], np.unique(np.round(np.logspace(0, 4, 33))) + 0.5])
@@ -228,6 +229,7 @@ def main() -> None:
         all_extraps.extend(extraps)
     log_summary(extraps=all_extraps, centers=centers)
 
+    print(f"[plot] output={args.output}")
     with PdfPages(args.output) as pdf:
         plot_summary(extraps=all_extraps, centers=centers, pdf=pdf)
         for md, extraps in studied:
@@ -897,7 +899,7 @@ def plot_layer(
             marker="x",
             color=COLORS[name],
             zorder=4,
-            label=f"center, {CENTER_LABELS[name]}",
+            label=f"{LEGEND_LABELS[name]}",
         )
         if extrap.dr[name] is not None:
             ax.add_patch(
@@ -924,7 +926,7 @@ def plot_layer(
     else:
         k_per_center = []
         for name in centers:
-            k_per_center.append(f"{CENTER_LABELS[name]} {extrap.knn[name]}")
+            k_per_center.append(f"{LEGEND_LABELS[name]} {extrap.knn[name]}")
         result = "k: " + ", ".join(k_per_center)
     helix_dphi = wrap_phi(phi=extrap.center_phi["helix"] - md.md_phi)
     helix_deta = extrap.center_eta["helix"] - md.md_eta
@@ -994,33 +996,36 @@ def plot_summary(
     """The summary page: k and dR to the nearest sibling per center, and k vs own."""
     with_sibling = [extrap for extrap in extraps if len(extrap.siblings) > 0]
     fig, axs = plt.subplots(nrows=1, ncols=3, figsize=(15, 4.6))
-    for name in centers:
-        label = CENTER_LABELS[name]
+    for name in reversed(centers):
+        label = LEGEND_LABELS[name]
         axs[0].hist(
             [extrap.knn[name] for extrap in with_sibling],
             bins=K_BINS,
-            histtype="step",
-            linewidth=2,
-            color=COLORS[name],
+            histtype="stepfilled",
+            edgecolor="black",
+            linewidth=1,
+            color=to_rgba(COLORS[name], alpha=0.7),
             linestyle=LINESTYLES[name],
             label=label,
         )
         axs[1].hist(
             [max(extrap.dr[name], DR_BINS[0]) for extrap in with_sibling],
             bins=DR_BINS,
-            histtype="step",
-            linewidth=2,
-            color=COLORS[name],
+            histtype="stepfilled",
+            edgecolor="black",
+            linewidth=1,
+            color=to_rgba(COLORS[name], alpha=0.7),
             linestyle=LINESTYLES[name],
             label=label,
         )
     axs[0].set_xlabel("k: MDs on the layer within dR of the nearest sibling")
     axs[1].set_xlabel("dR from the center to the nearest sibling")
+    axs[0].legend(reverse=True, loc="upper right")
+    axs[1].legend(reverse=True, loc="upper left")
     for ax in axs[:2]:
         ax.set_xscale("log")
         ax.set_ylabel("(MD of interest, layer) pairs")
-        ax.grid(alpha=0.3)
-        ax.legend(title="Center", fontsize="small")
+        ax.grid(alpha=0.1)
 
     for name in centers:
         if name == "own":
@@ -1031,7 +1036,7 @@ def plot_summary(
             s=10,
             color=COLORS[name],
             alpha=0.6,
-            label=CENTER_LABELS[name],
+            label=LEGEND_LABELS[name],
         )
     axs[2].plot([1, 1e4], [1, 1e4], color="black", linewidth=1, linestyle=":")
     axs[2].set_xscale("log")
