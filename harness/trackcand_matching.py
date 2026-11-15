@@ -1,8 +1,8 @@
 """
 Match a track candidate to a sim track, following LST's matchedSimTrkIdxsAndFracs (trkCore.cc).
 
-Each of the candidate's unique hits counts once for every sim it belongs to (a hit with two sims counts for both).
-The candidate matches its best sim if that sim has more than MATCH_FRACTION of the unique hits.
+Each of the track candidate's unique hits counts once for every sim it belongs to (a hit with two sims counts for
+both). The track candidate matches its best sim if that sim has more than MATCH_FRACTION of the unique hits.
 
 Like LST, hits with no sim compete as one more "sim": if they outnumber the best sim, the fraction is 0.
 """
@@ -16,7 +16,7 @@ def best_sim(
     hit_sims: dict[int, list[int]],
 ) -> tuple[int, float]:
     """
-    The sim with the most of the candidate's unique hits, and its fraction of them.
+    The sim with the most of the track candidate's unique hits, and its fraction of them.
 
     hit_sims is the map from md_truth.hit_sims_from_mds. On a tie between sims, the smaller sim index wins.
 
@@ -67,7 +67,7 @@ def matched_sim(
     hits: list[int],
     hit_sims: dict[int, list[int]],
 ) -> int:
-    """The candidate's best sim if its fraction is above MATCH_FRACTION, else UNMATCHED."""
+    """The track candidate's best sim if its fraction is above MATCH_FRACTION, else UNMATCHED."""
     sim, fraction = best_sim(hits=hits, hit_sims=hit_sims)
     if fraction > MATCH_FRACTION:
         return sim

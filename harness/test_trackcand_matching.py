@@ -1,11 +1,11 @@
 """
-Tests for harness/candidate_matching.py (plain asserts; runs without pytest).
+Tests for harness/trackcand_matching.py (plain asserts; runs without pytest).
 
 From the repo root:
-apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.test_candidate_matching
+apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.test_trackcand_matching
 """
 
-from harness.candidate_matching import UNMATCHED, best_sim, matched_sim
+from harness.trackcand_matching import UNMATCHED, best_sim, matched_sim
 
 # Hits 1-4: sim 5; hit 5: sims 5 and 7; hits 6-7: sim 7; hits 8-9: sim 8; hit 10: no sim (not in the map)
 HIT_SIMS = {
