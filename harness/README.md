@@ -57,6 +57,9 @@ Later: comparison at matched efficiency (tune score thresholds on the tuning set
 | 2026-11-14 | Matching must reproduce LST's `t5_simIdx` exactly, unless LST colleagues say it shouldn't. |
 | 2026-11-14 | `best_sim` also reproduces LST's pMatched exactly: hits with no sim compete as one more "sim" (fraction 0 if they outnumber the best sim, or tie and appear first). Costs order dependence in that tie; never changes a match. On 10 events: 15534 / 15534 5-layer T5s agree with `t5_pMatched`. |
 | 2026-11-14 | Rebuilt piece by piece with review; the previous version is kept outside the repo for comparison. |
+| 2026-11-15 | A T5 track candidate is its 10 base hits (5 base MDs), as LST matches T5s; the extension-layer hits that `t5_hitIndices` appends are left out. Open: how to treat extension hits (asking colleagues). |
+| 2026-11-15 | All T5s are track candidates by default (focus on efficiency and fake rate). `trackcands_from_t5s(drop_duplicate_cleaned=True)` drops those removed by LST's T5-T5 duplicate cleaning (`t5_isDupBitmask` bits 1, 2), to try later. |
+| 2026-11-15 | Track candidate hits are a numpy int array, shape (n_trackcands, n_hits_max), padded with `NO_HIT = -999`, so every `EventTrackCandidates` field is numpy. Strip padding (`hit >= 0`) before matching: a padded slot would count as a hit with no sim. T5s use exactly 10 base hits, so no padding yet. |
 
 ## Running
 
