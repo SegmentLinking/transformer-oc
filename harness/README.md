@@ -24,7 +24,7 @@ All on a fixed set of events, as `[tag] key=value` logs and pdf plots.
 Each is one small module with its own test, checked against the previous implementation on the same events.
 
 1. **`md_truth.py`:** which sims each OT hit belongs to, from the ntuple's per-hit MD branches (pLS MDs skipped).
-2. **`matching.py`:** over a candidate's unique hits, count the hits of each sim (a hit with two sims counts for
+2. **`candidate_matching.py`:** over a candidate's unique hits, count the hits of each sim (a hit with two sims counts for
    both). The candidate matches a sim with more than 75% of its hits, as LST. Check: reproduce LST's `t5_simIdx`.
 3. **`metrics.py`:** the efficiency denominator (LST's type 7: charged, pT ≥ 1 GeV, |η| ≤ 2.4, vertex near the
    beam spot, hard scatter), then efficiency, fake rate and duplicate rate from the matches.
@@ -44,6 +44,10 @@ Later: comparison at matched efficiency (tune score thresholds on the tuning set
 | 2026-11-14 | The T5 selection (whether LST's duplicate-cleaned T5s count) stays open: decide it head-on when writing `score_t5.py`. |
 | 2026-11-14 | Duplicate rate is per candidate for now; confirm against the tracking group's definition when writing `metrics.py`. |
 | 2026-11-14 | Hit truth comes from OT MDs only (pLS MDs skipped); hits with no sim are left out of the hit → sims map. |
+| 2026-11-14 | Unmatched is written as `UNMATCHED = -999` (LST's value) but always tested as `sim < 0`, since LST code uses several negative values. |
+| 2026-11-14 | Candidates are matched one at a time (a Python loop); revisit if it's too slow. |
+| 2026-11-14 | Matching must reproduce LST's `t5_simIdx` exactly, unless LST colleagues say it shouldn't. |
+| 2026-11-14 | `best_sim` also reproduces LST's pMatched exactly: hits with no sim compete as one more "sim" (fraction 0 if they outnumber the best sim, or tie and appear first). Costs order dependence in that tie; never changes a match. On 10 events: 15534 / 15534 5-layer T5s agree with `t5_pMatched`. |
 | 2026-11-14 | Rebuilt piece by piece with review; the previous version is kept outside the repo for comparison. |
 
 ## Running
