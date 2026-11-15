@@ -60,6 +60,7 @@ Later: comparison at matched efficiency (tune score thresholds on the tuning set
 | 2026-11-15 | A T5 track candidate is its 10 base hits (5 base MDs), as LST matches T5s; the extension-layer hits that `t5_hitIndices` appends are left out. Open: how to treat extension hits (asking colleagues). |
 | 2026-11-15 | All T5s are track candidates by default (focus on efficiency and fake rate). `trackcands_from_t5s(drop_duplicate_cleaned=True)` drops those removed by LST's T5-T5 duplicate cleaning (`t5_isDupBitmask` bits 1, 2), to try later. |
 | 2026-11-15 | Track candidate hits are a numpy int array, shape (n_trackcands, n_hits_max), padded with `NO_HIT = -999`, so every `EventTrackCandidates` field is numpy. Strip padding (`hit >= 0`) before matching: a padded slot would count as a hit with no sim. T5s use exactly 10 base hits, so no padding yet. |
+| 2026-11-15 | The manifest records LSTNtuple file names, not paths. The same inputs exist as all-sim ntuples (training) and nominal ntuples (evaluation), with the same names and event order. The harness joins `lstntuple_file` with the nominal directory it's given. Checked: one file entry by entry against both all-sim copies (100 / 100 entries agree on the number of MDs, the number of T5s and the sum of T5 pT), and 84 / 84 manifest events in 28 finished nominal files have as many OT MDs as their `.pt` files. |
 
 ## Running
 
