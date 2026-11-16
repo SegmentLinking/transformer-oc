@@ -1,12 +1,12 @@
 """
-Walk through the pT-extrapolated (curvature-aware) neighbourhood of single MDs, one MD at a time.
+Walk through the helix (curvature-aware) projections of single MDs onto other layers, one MD at a time.
 
 For each MD of interest (a true outer-tracker MD of a prompt hard-scatter sim with pT >= PT_MIN):
   1. Check LST's MD estimates: md_pt = rt * K2RINV_1GEV / sin(md_dphichange), with rt the anchor hit's, and
      md_eta, md_phi the direction of the anchor hit (x, y, z) seen from the origin.
   2. Find its sim and its siblings: the other true MDs of that sim (md_simIdx: both hits from the sim).
   3. On every layer the track could cross (a straight line in r-z from the origin through the MD) and every layer
-     with a sibling, place neighbourhood centers in (eta, phi):
+     with a sibling, place projections in (eta, phi):
          own:               the MD's own (eta, phi).
          helix:             using only what one MD gives: the helix with the MD's q/pT estimate, q/pT = -1 / md_pt,
                             from a vertex assumed at (0, 0, 0) through the MD, followed to where it reaches the
@@ -20,7 +20,7 @@ For each MD of interest (a true outer-tracker MD of a prompt hard-scatter sim wi
      A helix from the beam line has phi(r) = phi0 - asin(K2RINV_1GEV * r * q/pT), so going from the MD's radius to
      the layer's radius moves phi by
      -(asin(K2RINV_1GEV * r_layer * q/pT) - asin(K2RINV_1GEV * md_anchor_rt * q/pT)).
-  4. From each center, measure dR to the nearest sibling on the layer, and k: the number of MDs on the layer
+  4. From each projection, measure dR to the nearest sibling on the layer, and k: the number of MDs on the layer
      within that dR (k = 1: the sibling is the nearest MD on the layer). k is the number of neighbours per layer a
      model needs to see that sibling. The MD's own layer is skipped.
 
@@ -30,17 +30,17 @@ almost always appear. Positions are anchor hits, as in md_eta and md_phi.
 Self-contained: reads one LSTNtuple and nothing else from the repo.
 
 Output: one pdf, --output.
-    Page 1, summary: k and dR to the nearest sibling per center, over all MDs of interest and layers.
+    Page 1, summary: k and dR to the nearest sibling per projection, over all MDs of interest and layers.
     Then one page per MD, in layer order. First panel: x-y view of the sim's MDs, with the straight line (own phi)
-        and the helices with the MD's and the sim's q/pT. Then one panel per layer: the layer's MDs near the centers
-        in (phi, eta), siblings highlighted, and a circle around each center reaching the nearest sibling, so it
-        holds k MDs.
+        and the helices with the MD's and the sim's q/pT. Then one panel per layer: the layer's MDs near the
+        projections in (phi, eta), siblings highlighted, and a circle around each projection reaching the nearest
+        sibling, so it holds k MDs.
 Logs (key=value): [check] per event, [md] per MD of interest, [layer] per (MD, layer), [summary] per category.
 
 Usage (from the repo root):
     apptainer exec /ceph/users/atuna/ml-tracking.sif python3 studies/md_extrapolation_demo.py \
         --input ../transformer-datasets/samples/ttbar/LSTNtuple_<X>.root \
-        --output ../md_plots/md_extrapolation.pdf
+        --output ../md_plots/md_projection.pdf
 """
 
 import os
@@ -75,10 +75,10 @@ ROAD_MARGIN = 0.1
 FLAT_SIDES = {3}
 # md_type: 1 = PS, 0 = 2S
 PS_TYPE = 1
-# Neighbourhood centers (see the module docstring): shown by default, and with --detailed. All are computed and
-# logged per layer either way.
-SALIENT_CENTERS = ["own", "helix", "oracle"]
-DETAILED_CENTERS = ["own", "helix", "helix_sim_qoverpt", "helix_sim_vz", "oracle"]
+# Projections (see the module docstring): shown by default, and with --detailed. All are computed and logged per
+# layer either way.
+SALIENT_PROJECTIONS = ["own", "helix", "oracle"]
+DETAILED_PROJECTIONS = ["own", "helix", "helix_sim_qoverpt", "helix_sim_vz", "oracle"]
 # Short names in plot titles and legends
 LEGEND_LABELS = {
     "own": r"MD $\eta$, $\phi$",
@@ -87,7 +87,7 @@ LEGEND_LABELS = {
     "helix_sim_vz": "MD helix, sim. vz",
     "oracle": "MD sim. helix",
 }
-# Pairs of centers compared in the [summary] log, when both are shown: (center, reference)
+# Pairs of projections compared in the [summary] log, when both are shown: (projection, reference)
 COMPARISONS = [
     ("helix", "own"),
     ("helix_sim_qoverpt", "helix"),
@@ -96,7 +96,7 @@ COMPARISONS = [
 ]
 REGIONS = ["barrel_flat", "barrel_tilted", "endcap"]
 PT_BINS = [(0.8, 1.0), (1.0, 2.0), (2.0, np.inf)]
-# Padding (in eta and phi) of each layer panel around the siblings, centers and circles
+# Padding (in eta and phi) of each layer panel around the siblings, projections and circles
 WINDOW = 0.1
 # Slots of the dataviz skill's validated categorical palette
 COLORS = {
@@ -163,7 +163,7 @@ GEOMETRY = {
 
 @dataclass
 class MDOfInterest:
-    """One MD we extrapolate from: its own estimates, its sim, and the other MDs of that sim."""
+    """One MD we project from: its own estimates, its sim, and the other MDs of that sim."""
 
     tree_entry: int
     i_md: int
@@ -189,8 +189,8 @@ class MDOfInterest:
 
 
 @dataclass
-class ExtrapolationToLayer:
-    """One MD of interest extrapolated to one layer: the centers, and how close each one is to a sibling there."""
+class ProjectionToLayer:
+    """One MD of interest projected to one layer: the projections, and how close each one is to a sibling there."""
 
     md: MDOfInterest
     layer: int
@@ -200,10 +200,10 @@ class ExtrapolationToLayer:
     n_md_on_layer: int
     # The MD of interest's siblings on this layer
     siblings: list[int]
-    # Per center (all DETAILED_CENTERS)
-    center_eta: dict[str, float]
-    center_phi: dict[str, float]
-    # Per center: dR to the nearest sibling and k (see nearest_sibling_k), None without a sibling on the layer
+    # Per projection (all DETAILED_PROJECTIONS)
+    eta: dict[str, float]
+    phi: dict[str, float]
+    # Per projection: dR to the nearest sibling and k (see nearest_sibling_k), None without a sibling on the layer
     dr: dict[str, float | None]
     knn: dict[str, int | None]
 
@@ -215,29 +215,29 @@ def main() -> None:
         return
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     rng = random.Random(args.seed)
-    centers = DETAILED_CENTERS if args.detailed else SALIENT_CENTERS
+    proj_names = DETAILED_PROJECTIONS if args.detailed else SALIENT_PROJECTIONS
     with uproot.open(args.input) as root_file:
         mds, sims = read_event(tree=root_file["tree"], tree_entry=args.tree_entry)
     check_lst_estimates(mds=mds, tree_entry=args.tree_entry)
 
     # Study every MD first, so the summary can be the first page
     studied = []
-    all_extraps = []
+    all_projs = []
     for i_md in pick_mds(mds=mds, sims=sims, rng=rng, n_mds=args.n_mds):
-        md, extraps = study_md(mds=mds, sims=sims, i_md=i_md)
-        studied.append((md, extraps))
-        all_extraps.extend(extraps)
-    log_summary(extraps=all_extraps, centers=centers)
+        md, projs = study_md(mds=mds, sims=sims, i_md=i_md)
+        studied.append((md, projs))
+        all_projs.extend(projs)
+    log_summary(projs=all_projs, proj_names=proj_names)
 
     print(f"[plot] output={args.output}")
     with PdfPages(args.output) as pdf:
-        plot_summary(extraps=all_extraps, centers=centers, pdf=pdf)
-        for md, extraps in studied:
+        plot_summary(projs=all_projs, proj_names=proj_names, pdf=pdf)
+        for md, projs in studied:
             plot_md(
                 mds=mds,
                 md=md,
-                extraps=extraps,
-                centers=centers,
+                projs=projs,
+                proj_names=proj_names,
                 pdf=pdf,
             )
     print(f"[done] output={args.output} n_pages={1 + len(studied)}")
@@ -262,7 +262,7 @@ def parse_args() -> Namespace:
     parser.add_argument(
         "--output",
         type=str,
-        default="md_extrapolation.pdf",
+        default="md_projection.pdf",
         help="The pdf to write",
     )
     parser.add_argument(
@@ -420,11 +420,11 @@ def study_md(
     mds: dict[str, np.ndarray],
     sims: dict[str, np.ndarray],
     i_md: int,
-) -> tuple[MDOfInterest, list[ExtrapolationToLayer]]:
+) -> tuple[MDOfInterest, list[ProjectionToLayer]]:
     """
-    The five centers, and dR and k from each, on every layer for one MD of interest.
+    The five projections, and dR and k from each, on every layer for one MD of interest.
 
-    md: the MD of interest, its sim and its siblings. extraps: one per layer in the road or with a sibling.
+    md: the MD of interest, its sim and its siblings. projs: one per layer in the road or with a sibling.
     """
     simidx = mds["md_simIdx"][i_md]
     siblings = []
@@ -465,7 +465,7 @@ def study_md(
 
     sibling_layers = {mds["md_layer"][i_sibling] for i_sibling in siblings}
     sibling_layers -= {md.md_layer}
-    extraps = []
+    projs = []
     for target_layer in sorted(set(road_layers) | sibling_layers):
         on_layer = np.flatnonzero((mds["md_layer"] == target_layer) & ~mds["md_isPLS"])
         siblings_here = [
@@ -473,11 +473,11 @@ def study_md(
             for i_sibling in siblings
             if mds["md_layer"][i_sibling] == target_layer
         ]
-        center_eta, center_phi = layer_centers(
+        proj_eta, proj_phi = layer_projections(
             target_layer=target_layer,
             md=md,
         )
-        extrap = ExtrapolationToLayer(
+        proj = ProjectionToLayer(
             md=md,
             layer=target_layer,
             in_road=target_layer in road_layers,
@@ -488,26 +488,26 @@ def study_md(
             ),
             n_md_on_layer=len(on_layer),
             siblings=siblings_here,
-            center_eta=center_eta,
-            center_phi=center_phi,
+            eta=proj_eta,
+            phi=proj_phi,
             dr={},
             knn={},
         )
-        for name in DETAILED_CENTERS:
+        for name in DETAILED_PROJECTIONS:
             if len(siblings_here) == 0:
-                extrap.dr[name] = None
-                extrap.knn[name] = None
+                proj.dr[name] = None
+                proj.knn[name] = None
                 continue
-            extrap.dr[name], extrap.knn[name] = nearest_sibling_k(
-                center_eta=center_eta[name],
-                center_phi=center_phi[name],
+            proj.dr[name], proj.knn[name] = nearest_sibling_k(
+                proj_eta=proj_eta[name],
+                proj_phi=proj_phi[name],
                 mds=mds,
                 siblings=siblings_here,
                 on_layer=on_layer,
             )
-        log_layer(extrap=extrap)
-        extraps.append(extrap)
-    return md, extraps
+        log_layer(proj=proj)
+        projs.append(proj)
+    return md, projs
 
 
 def region(
@@ -554,19 +554,19 @@ def projected_layers(
     return road_layers
 
 
-def layer_centers(
+def layer_projections(
     target_layer: int,
     md: MDOfInterest,
 ) -> tuple[dict[str, float], dict[str, float]]:
     """
-    (center_eta, center_phi) of all DETAILED_CENTERS on the target layer, see the module docstring.
+    (proj_eta, proj_phi) of all DETAILED_PROJECTIONS on the target layer, see the module docstring.
 
-    own stays at the MD's (eta, phi). The three helix centers follow a helix from (0, 0, vz) through the MD, each
-    with its own q/pT and vz. The oracle follows the sim's helix from its vertex, with the sim's eta.
+    own stays at the MD's (eta, phi). The three helix projections follow a helix from (0, 0, vz) through the MD,
+    each with its own q/pT and vz. The oracle follows the sim's helix from its vertex, with the sim's eta.
     """
-    center_eta = {"own": md.md_eta}
-    center_phi = {"own": md.md_phi}
-    # Per helix center through the MD: (q/pT, vz)
+    proj_eta = {"own": md.md_eta}
+    proj_phi = {"own": md.md_phi}
+    # Per helix projection through the MD: (q/pT, vz)
     helix_inputs = {
         "helix": (md.md_qoverpt, 0.0),
         "helix_sim_qoverpt": (md.sim_qoverpt, 0.0),
@@ -575,24 +575,24 @@ def layer_centers(
     for name, (qoverpt, vz) in helix_inputs.items():
         # z = vz + s * sinh(eta) at the MD gives the helix's sinh(eta)
         md_path_length = path_length(rt=md.md_anchor_rt, qoverpt=qoverpt)
-        center_eta[name], center_phi[name] = helix_center(
+        proj_eta[name], proj_phi[name] = helix_projection(
             target_layer=target_layer,
             qoverpt=qoverpt,
             vz=vz,
             sinh_eta=(md.md_anchor_z - vz) / md_path_length,
             md=md,
         )
-    center_eta["oracle"], center_phi["oracle"] = helix_center(
+    proj_eta["oracle"], proj_phi["oracle"] = helix_projection(
         target_layer=target_layer,
         qoverpt=md.sim_qoverpt,
         vz=md.sim_vz,
         sinh_eta=np.sinh(md.sim_eta),
         md=md,
     )
-    return center_eta, center_phi
+    return proj_eta, proj_phi
 
 
-def helix_center(
+def helix_projection(
     target_layer: int,
     qoverpt: float,
     vz: float,
@@ -688,51 +688,51 @@ def bend(
 
 
 def nearest_sibling_k(
-    center_eta: float,
-    center_phi: float,
+    proj_eta: float,
+    proj_phi: float,
     mds: dict[str, np.ndarray],
     siblings: list[int],
     on_layer: np.ndarray,
 ) -> tuple[float, int]:
     """
-    (dR, k) from one center: dR to the nearest sibling on the layer, and k, the number of MDs on the layer at
-    least that close to the center (the sibling included, so k >= 1).
+    (dR, k) from one projection: dR to the nearest sibling on the layer, and k, the number of MDs on the layer at
+    least that close to the projection (the sibling included, so k >= 1).
     """
     dr_siblings = []
     for i_sibling in siblings:
         dr_siblings.append(
             delta_r(
-                eta_a=center_eta,
-                phi_a=center_phi,
+                eta_a=proj_eta,
+                phi_a=proj_phi,
                 eta_b=mds["md_eta"][i_sibling],
                 phi_b=mds["md_phi"][i_sibling],
             )
         )
     radius = min(dr_siblings)
     dr_all = delta_r(
-        eta_a=center_eta,
-        phi_a=center_phi,
+        eta_a=proj_eta,
+        phi_a=proj_phi,
         eta_b=mds["md_eta"][on_layer],
         phi_b=mds["md_phi"][on_layer],
     )
     return radius, int(np.sum(dr_all <= radius))
 
 
-def log_layer(extrap: ExtrapolationToLayer) -> None:
-    """One [layer] line: per center, its shift from the MD (dphi, deta), dR to the nearest sibling and k."""
-    md = extrap.md
+def log_layer(proj: ProjectionToLayer) -> None:
+    """One [layer] line: per projection, its shift from the MD (dphi, deta), dR to the nearest sibling and k."""
+    md = proj.md
     fields = []
-    for name in DETAILED_CENTERS:
-        dphi = wrap_phi(phi=extrap.center_phi[name] - md.md_phi)
-        deta = extrap.center_eta[name] - md.md_eta
+    for name in DETAILED_PROJECTIONS:
+        dphi = wrap_phi(phi=proj.phi[name] - md.md_phi)
+        deta = proj.eta[name] - md.md_eta
         fields.append(
             f"dphi_{name}={dphi:+.4f} deta_{name}={deta:+.4f} "
-            f"dr_{name}={fmt(value=extrap.dr[name])} k_{name}={extrap.knn[name]}"
+            f"dr_{name}={fmt(value=proj.dr[name])} k_{name}={proj.knn[name]}"
         )
     print(
         f"[layer] tree_entry={md.tree_entry} i_md={md.i_md} md_layer={md.md_layer} "
-        f"layer={extrap.layer} in_road={extrap.in_road} r_target={extrap.r_target:.1f} "
-        f"n_md_on_layer={extrap.n_md_on_layer} n_siblings={len(extrap.siblings)} "
+        f"layer={proj.layer} in_road={proj.in_road} r_target={proj.r_target:.1f} "
+        f"n_md_on_layer={proj.n_md_on_layer} n_siblings={len(proj.siblings)} "
         + " ".join(fields)
     )
 
@@ -758,12 +758,12 @@ def fmt(value: float | None) -> str:
 def plot_md(
     mds: dict[str, np.ndarray],
     md: MDOfInterest,
-    extraps: list[ExtrapolationToLayer],
-    centers: list[str],
+    projs: list[ProjectionToLayer],
+    proj_names: list[str],
     pdf: PdfPages,
 ) -> None:
     """One page per MD of interest: the x-y view, then one panel per layer."""
-    n_panels = 1 + len(extraps)
+    n_panels = 1 + len(projs)
     n_cols = 4
     n_rows = (n_panels + n_cols - 1) // n_cols
     fig, axs = plt.subplots(
@@ -771,8 +771,8 @@ def plot_md(
     )
     axs = axs.ravel()
     plot_transverse(ax=axs[0], mds=mds, md=md)
-    for ax, extrap in zip(axs[1:], extraps):
-        plot_layer(ax=ax, mds=mds, md=md, extrap=extrap, centers=centers)
+    for ax, proj in zip(axs[1:], projs):
+        plot_layer(ax=ax, mds=mds, md=md, proj=proj, proj_names=proj_names)
     for ax in axs[n_panels:]:
         ax.axis("off")
     axs[1].legend(fontsize="x-small", loc="upper left")
@@ -847,30 +847,30 @@ def plot_layer(
     ax: plt.Axes,
     mds: dict[str, np.ndarray],
     md: MDOfInterest,
-    extrap: ExtrapolationToLayer,
-    centers: list[str],
+    proj: ProjectionToLayer,
+    proj_names: list[str],
 ) -> None:
-    """MDs of one layer in (phi, eta), with the centers and the circles reaching the nearest sibling."""
+    """MDs of one layer in (phi, eta), with the projections and the circles reaching the nearest sibling."""
     # phi is drawn as md_phi + (wrapped difference to md_phi), so a panel near phi = ±pi does not split in two;
     # its axis may then run slightly beyond ±pi
-    center_x = {}
-    for name in centers:
-        center_x[name] = md.md_phi + wrap_phi(phi=extrap.center_phi[name] - md.md_phi)
+    proj_x = {}
+    for name in proj_names:
+        proj_x[name] = md.md_phi + wrap_phi(phi=proj.phi[name] - md.md_phi)
     sibling_x = []
     sibling_y = []
-    for i_sibling in extrap.siblings:
+    for i_sibling in proj.siblings:
         sibling_x.append(md.md_phi + wrap_phi(phi=mds["md_phi"][i_sibling] - md.md_phi))
         sibling_y.append(mds["md_eta"][i_sibling])
 
-    # A square window around the centers, siblings and circles
-    xs = list(center_x.values()) + sibling_x
-    ys = [extrap.center_eta[name] for name in centers] + sibling_y
-    radii = [extrap.dr[name] or 0.0 for name in centers]
+    # A square window around the projections, siblings and circles
+    xs = list(proj_x.values()) + sibling_x
+    ys = [proj.eta[name] for name in proj_names] + sibling_y
+    radii = [proj.dr[name] or 0.0 for name in proj_names]
     middle_x = 0.5 * (min(xs) + max(xs))
     middle_y = 0.5 * (min(ys) + max(ys))
     half = 0.5 * max(max(xs) - min(xs), max(ys) - min(ys)) + max(radii) + WINDOW
 
-    on_layer = (mds["md_layer"] == extrap.layer) & ~mds["md_isPLS"]
+    on_layer = (mds["md_layer"] == proj.layer) & ~mds["md_isPLS"]
     bkg_x = md.md_phi + wrap_phi(phi=mds["md_phi"][on_layer] - md.md_phi)
     bkg_y = mds["md_eta"][on_layer]
     in_window = (np.abs(bkg_x - middle_x) < half) & (np.abs(bkg_y - middle_y) < half)
@@ -891,21 +891,21 @@ def plot_layer(
         zorder=3,
         label="siblings",
     )
-    for name in centers:
-        center = (center_x[name], extrap.center_eta[name])
+    for name in proj_names:
+        proj_xy = (proj_x[name], proj.eta[name])
         ax.scatter(
-            *center,
+            *proj_xy,
             s=60,
             marker="x",
             color=COLORS[name],
             zorder=4,
             label=f"{LEGEND_LABELS[name]}",
         )
-        if extrap.dr[name] is not None:
+        if proj.dr[name] is not None:
             ax.add_patch(
                 plt.Circle(
-                    center,
-                    extrap.dr[name],
+                    proj_xy,
+                    proj.dr[name],
                     fill=False,
                     color=COLORS[name],
                     linestyle=LINESTYLES[name],
@@ -919,46 +919,46 @@ def plot_layer(
     ax.set_ylabel(r"$\eta$")
     ax.grid(alpha=0.3)
 
-    where = "barrel" if extrap.layer in BARREL_LAYERS else "endcap"
-    road = "" if extrap.in_road else ", not in road"
-    if len(extrap.siblings) == 0:
+    where = "barrel" if proj.layer in BARREL_LAYERS else "endcap"
+    road = "" if proj.in_road else ", not in road"
+    if len(proj.siblings) == 0:
         result = "no sibling"
     else:
-        k_per_center = []
-        for name in centers:
-            k_per_center.append(f"{LEGEND_LABELS[name]} {extrap.knn[name]}")
-        result = "k: " + ", ".join(k_per_center)
-    helix_dphi = wrap_phi(phi=extrap.center_phi["helix"] - md.md_phi)
-    helix_deta = extrap.center_eta["helix"] - md.md_eta
+        k_per_proj = []
+        for name in proj_names:
+            k_per_proj.append(f"{LEGEND_LABELS[name]} {proj.knn[name]}")
+        result = "k: " + ", ".join(k_per_proj)
+    helix_dphi = wrap_phi(phi=proj.phi["helix"] - md.md_phi)
+    helix_deta = proj.eta["helix"] - md.md_eta
     ax.set_title(
-        f"Layer {extrap.layer} ({where}{road})\n{result}\n"
-        f"r = {extrap.r_target:.0f} cm, helix dphi {helix_dphi:+.3f} deta {helix_deta:+.3f}",
+        f"Layer {proj.layer} ({where}{road})\n{result}\n"
+        f"r = {proj.r_target:.0f} cm, helix dphi {helix_dphi:+.3f} deta {helix_deta:+.3f}",
         fontsize=10,
     )
 
 
 def log_summary(
-    extraps: list[ExtrapolationToLayer],
-    centers: list[str],
+    projs: list[ProjectionToLayer],
+    proj_names: list[str],
 ) -> None:
     """
-    Median and 90% quantile of k per center, and how often each COMPARISONS center beats its reference (when both
-    are in centers), per region of the MD of interest, per sim pT bin and overall.
+    Median and 90% quantile of k per projection, and how often each COMPARISONS projection beats its reference
+    (when both are in proj_names), per region of the MD of interest, per sim pT bin and overall.
     """
-    with_sibling = [extrap for extrap in extraps if len(extrap.siblings) > 0]
+    with_sibling = [proj for proj in projs if len(proj.siblings) > 0]
     groups = []
     for name in REGIONS:
         groups.append(
             (
                 f"region={name}",
-                [extrap for extrap in with_sibling if extrap.md.md_region == name],
+                [proj for proj in with_sibling if proj.md.md_region == name],
             )
         )
     for low, high in PT_BINS:
         groups.append(
             (
                 f"sim_pt={low}-{high}",
-                [extrap for extrap in with_sibling if low <= extrap.md.sim_pt < high],
+                [proj for proj in with_sibling if low <= proj.md.sim_pt < high],
             )
         )
     groups.append(("all", with_sibling))
@@ -967,19 +967,19 @@ def log_summary(
         if len(group) == 0:
             continue
         fields = []
-        for name in centers:
-            knn = [extrap.knn[name] for extrap in group]
+        for name in proj_names:
+            knn = [proj.knn[name] for proj in group]
             fields.append(
                 f"k_{name}_median={np.median(knn):.0f} k_{name}_q90={np.quantile(knn, 0.9):.0f}"
             )
         for name, reference in COMPARISONS:
-            if name not in centers or reference not in centers:
+            if name not in proj_names or reference not in proj_names:
                 continue
             n_better = sum(
-                1 for extrap in group if extrap.knn[name] < extrap.knn[reference]
+                1 for proj in group if proj.knn[name] < proj.knn[reference]
             )
             n_worse = sum(
-                1 for extrap in group if extrap.knn[name] > extrap.knn[reference]
+                1 for proj in group if proj.knn[name] > proj.knn[reference]
             )
             fields.append(
                 f"n_{name}_better_than_{reference}={n_better} "
@@ -989,17 +989,17 @@ def log_summary(
 
 
 def plot_summary(
-    extraps: list[ExtrapolationToLayer],
-    centers: list[str],
+    projs: list[ProjectionToLayer],
+    proj_names: list[str],
     pdf: PdfPages,
 ) -> None:
-    """The summary page: k and dR to the nearest sibling per center, and k vs own."""
-    with_sibling = [extrap for extrap in extraps if len(extrap.siblings) > 0]
+    """The summary page: k and dR to the nearest sibling per projection, and k vs own."""
+    with_sibling = [proj for proj in projs if len(proj.siblings) > 0]
     fig, axs = plt.subplots(nrows=1, ncols=3, figsize=(15, 4.6))
-    for name in reversed(centers):
+    for name in reversed(proj_names):
         label = LEGEND_LABELS[name]
         axs[0].hist(
-            [extrap.knn[name] for extrap in with_sibling],
+            [proj.knn[name] for proj in with_sibling],
             bins=K_BINS,
             histtype="stepfilled",
             edgecolor="black",
@@ -1009,7 +1009,7 @@ def plot_summary(
             label=label,
         )
         axs[1].hist(
-            [max(extrap.dr[name], DR_BINS[0]) for extrap in with_sibling],
+            [max(proj.dr[name], DR_BINS[0]) for proj in with_sibling],
             bins=DR_BINS,
             histtype="stepfilled",
             edgecolor="black",
@@ -1028,12 +1028,12 @@ def plot_summary(
         ax.grid(alpha=0.1)
         ax.xaxis.set_major_formatter(matplotlib.ticker.StrMethodFormatter("{x:g}"))
 
-    for name in centers:
+    for name in proj_names:
         if name == "own":
             continue
         axs[2].scatter(
-            [extrap.knn["own"] for extrap in with_sibling],
-            [extrap.knn[name] for extrap in with_sibling],
+            [proj.knn["own"] for proj in with_sibling],
+            [proj.knn[name] for proj in with_sibling],
             s=10,
             color=COLORS[name],
             alpha=0.6,
@@ -1043,14 +1043,14 @@ def plot_summary(
     axs[2].set_xscale("log")
     axs[2].set_yscale("log")
     axs[2].set_xlabel("k, own (eta, phi)")
-    axs[2].set_ylabel("k, shifted center")
-    axs[2].legend(title="Center", fontsize="small")
+    axs[2].set_ylabel("k, shifted projection")
+    axs[2].legend(title="Projection", fontsize="small")
     axs[2].set_title("Below the diagonal: the shift helps", fontsize=10)
     axs[2].grid(alpha=0.3)
 
-    n_mds = len({(extrap.md.tree_entry, extrap.md.i_md) for extrap in extraps})
+    n_mds = len({(proj.md.tree_entry, proj.md.i_md) for proj in projs})
     fig.suptitle(
-        f"pT-extrapolated vs plain (eta, phi) neighbourhood: {n_mds} MDs of interest, "
+        f"Helix projection vs plain (eta, phi): {n_mds} MDs of interest, "
         f"{len(with_sibling)} (MD, layer) pairs with a sibling",
         fontsize=11,
     )
