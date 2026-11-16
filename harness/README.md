@@ -39,7 +39,7 @@ Each is one small module with its own test, checked against the previous impleme
    candidate: an event has about 60k T5s), and functions that build it from T5s and, later, from a model's output.
 5. **`events.py`:** which events form the train, validation, tuning and test sets, from the manifest. Never
    reshuffled.
-6. **`score_t5.py`:** the first driver: T5s through 1–5, with plots.
+6. **`evaluate_t5.py`:** the first driver: T5s through 1–5, with plots.
 
 Later: comparison at matched efficiency (tune score thresholds on the tuning set), and the decision rule.
 
@@ -48,7 +48,7 @@ Later: comparison at matched efficiency (tune score thresholds on the tuning set
 | Date | Decision |
 |---|---|
 | 2026-11-14 | Track candidates are sets of hits, not MDs: a hit can be in several MDs, and T5s and models then share one path. Revisit if colleagues expect the MD model to report MDs. |
-| 2026-11-14 | The T5 selection (whether LST's duplicate-cleaned T5s count) stays open: decide it head-on when writing `score_t5.py`. |
+| 2026-11-14 | Closed 2026-11-15 (was open: whether LST's duplicate-cleaned T5s count). Decided when writing `evaluate_t5.py`: all T5s by default, with `--drop-duplicate-cleaned` to try later (see the 2026-11-15 row). |
 | 2026-11-14 | Fake and duplicate follow LST exactly (`write_lst_ntuple.cc`, `performance.cc`): the duplicate rate is over all track candidates. Check: reproduce `t5_isFake` and `t5_isDuplicate`. |
 | 2026-11-14 | Closed (was open: which sims count for duplicates). Evaluate on nominal-mode ntuples. Matching and fakes use every sim, pileup included; duplicates count only stored sims (index < n_sims), which in nominal mode are the hard scatter. The code doesn't depend on the mode: on an all-sim ntuple every sim is stored, and the same code reproduces that file's flags. On 10 nominal events: 69863 / 69863 T5s agree with `t5_isFake`, `t5_isDuplicate` and `t5_simIdx`. |
 | 2026-11-14 | Hit truth comes from OT MDs only (pLS MDs skipped); hits with no sim are left out of the hit → sims map. |
