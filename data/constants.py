@@ -3,8 +3,6 @@ SIM_VARS = ["sim_pt", "sim_eta", "sim_phi", "sim_q", "sim_vx", "sim_vy", "sim_vz
 T3_VARS = ["t3_pt", "t3_eta", "t3_phi"]
 T3_HIT_SIMIDX = ["t3_hit_0_simIdx", "t3_hit_1_simIdx", "t3_hit_2_simIdx", "t3_hit_3_simIdx", "t3_hit_4_simIdx", "t3_hit_5_simIdx"]
 T3_HIT_LAYER = ["t3_hit_0_layer", "t3_hit_1_layer", "t3_hit_2_layer", "t3_hit_3_layer", "t3_hit_4_layer", "t3_hit_5_layer"]
-T3_HIT_DETID = [f"t3_hit_{i}_detId" for i in range(6)]
-T3_HIT_XYZ = [f"t3_hit_{i}_{c}" for c in ("x", "y", "z") for i in range(6)]  # x of all hits, then y, then z
 T3_PMATCHED = ["t3_pMatched"]
 LS_INDEX = ["t3_lsIdx0", "t3_lsIdx1"]
 
@@ -12,6 +10,7 @@ LS_VARS = ["ls_dPhis", "ls_dPhiChanges", "ls_dAlphaInners", "ls_dAlphaOuters", "
 
 MD_VARS = ["md_anchor_x", "md_anchor_y", "md_anchor_z", "md_other_x", "md_other_y", "md_other_z", "md_dphi", "md_dphichange", "md_dz"]
 MD_INDEX = ["ls_mdIdx0", "ls_mdIdx1"]
+MD_HIT_INDEX = ["md_anchor_hitIdx", "md_other_hitIdx"]  # T3 hit slot 2k is the anchor of MD k, 2k + 1 the other
 N_T3_MDS = 3  # distinct MDs per T3 (its two LSs share the middle one)
 
 TARGET = ["t3_simIdx"]
@@ -21,7 +20,7 @@ FAKE_TARGET = ["t3_isFake"]
 LAYER_INFO = ["md_layer"]
 MD_SIMIDX = ["md_simIdx"]
 
-ALL_COLUMNS = SIM_VARS + T3_VARS + T3_HIT_SIMIDX + T3_HIT_LAYER + T3_HIT_DETID + T3_HIT_XYZ + T3_PMATCHED + LS_INDEX + LS_VARS + MD_VARS + MD_INDEX + TARGET + FAKE_TARGET + LAYER_INFO + MD_SIMIDX
+ALL_COLUMNS = SIM_VARS + T3_VARS + T3_HIT_SIMIDX + T3_HIT_LAYER + T3_PMATCHED + LS_INDEX + LS_VARS + MD_VARS + MD_INDEX + MD_HIT_INDEX + TARGET + FAKE_TARGET + LAYER_INFO + MD_SIMIDX
 
 UNMATCHED = -999
 

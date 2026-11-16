@@ -14,7 +14,7 @@ import hashlib
 
 from constants import SIM_VARS, T3_VARS, T3_HIT_SIMIDX, T3_HIT_LAYER, T3_PMATCHED, LS_INDEX, LS_VARS, MD_VARS, MD_INDEX
 from constants import TARGET, FAKE_TARGET, LAYER_INFO, MD_SIMIDX, ALL_COLUMNS, MIN_T3_PT, MAX_T3_PT, UNMATCHED
-from constants import N_T3_MDS, T3_HIT_DETID, T3_HIT_XYZ
+from constants import N_T3_MDS, MD_HIT_INDEX
 
 
 class GraphBuilder:
@@ -112,13 +112,13 @@ class GraphBuilder:
 
             t3_features = t3_df[pt_mask].values
 
-            ls_idx = ak.to_dataframe(event_data[LS_INDEX])[pt_mask].values
-            md_idx = ak.to_dataframe(event_data[MD_INDEX]).values[ls_idx]
+            ls_idx_all = ak.to_dataframe(event_data[LS_INDEX]).values
+            md_idx_all = unique_t3_md_indices(ak.to_dataframe(event_data[MD_INDEX]).values[ls_idx_all])
+            ls_idx = ls_idx_all[pt_mask]
+            md_idx_flat = md_idx_all[pt_mask]
 
             ls_features = ak.to_dataframe(event_data[LS_VARS]).values[ls_idx]
             ls_features = ls_features.reshape(-1, 2 * len(LS_VARS))
-
-            md_idx_flat = unique_t3_md_indices(md_idx)
 
             md_features = ak.to_dataframe(event_data[MD_VARS]).values[md_idx_flat]
             md_features = md_features.reshape(-1, N_T3_MDS * len(MD_VARS))
@@ -141,8 +141,7 @@ class GraphBuilder:
 
             # Built from all T3s, so the table covers every hit in the event; hit_id is cut like the other per-T3 fields
             hit_id, hit_sim_candidates = build_hit_table(
-                detId=ak.to_dataframe(event_data[T3_HIT_DETID]).values,
-                xyz=ak.to_dataframe(event_data[T3_HIT_XYZ]).values.reshape(-1, 3, 6).transpose(0, 2, 1),
+                hit_idx=t3_hit_indices(md_idx_all, ak.to_dataframe(event_data[MD_HIT_INDEX]).values),
                 sim_lists=event_data[T3_HIT_SIMIDX],
                 layer=hit_layer_all,
             )
@@ -271,25 +270,36 @@ def unique_t3_md_indices(md_idx: np.ndarray) -> np.ndarray:
     return np.stack([md_idx[:, 0, 0], md_idx[:, 0, 1], md_idx[:, 1, 1]], axis=1)
 
 
-def build_hit_table(detId: np.ndarray, xyz: np.ndarray, sim_lists: ak.Array, layer: np.ndarray):
+def t3_hit_indices(md_idx: np.ndarray, md_hit_idx: np.ndarray) -> np.ndarray:
+    """
+    Ntuple hit indices of the six hits of each T3, in the order of the t3_hit_{0..5}_* branches.
+
+    Inputs: md_idx (n_t3, N_T3_MDS) from unique_t3_md_indices, and md_hit_idx (n_md, 2) with columns
+    MD_HIT_INDEX (anchor, other).
+    Output: integer array of shape (n_t3, 2 * N_T3_MDS) = (MD0 anchor, MD0 other, MD1 anchor, ...).
+
+    Pixel MDs have anchor == other, so a T3 can list the same hit index twice.
+    """
+    return md_hit_idx[md_idx].reshape(md_idx.shape[0], 2 * N_T3_MDS)
+
+
+def build_hit_table(hit_idx: np.ndarray, sim_lists: ak.Array, layer: np.ndarray):
     """
     Give every distinct hit of the event an id, and list the sim tracks of each distinct hit.
 
-    Inputs, for one event: detId (n_t3, 6), xyz (n_t3, 6, 3) float32 hit positions, sim_lists with fields
+    Inputs, for one event: hit_idx (n_t3, 6) ntuple hit indices from t3_hit_indices, sim_lists with fields
     T3_HIT_SIMIDX of shape (n_t3, var), and layer (n_t3, 6).
     Outputs: hit_id (n_t3, 6) int64 in [0, n_hits), and hit_sim_candidates (n_hits, K) int64.
 
-    A hit is identified by (detId, x, y, z), compared bit for bit, since the ntuple has no hit index.
+    hit_id is hit_idx renumbered to 0..n_hits-1 over the hits used by the T3s.
     The candidates of a hit are its distinct non-negative sim indices, largest first, padded with UNMATCHED.
     This is what LST's matchedSimTrkIdxsAndFracsFromCounts counts: a hit counts towards every sim track in its row.
 
-    Raises ValueError if two slots with the same id disagree on their sim tracks or layer, which would mean
-    the (detId, x, y, z) key is not unique.
+    Raises ValueError if two slots with the same hit index disagree on their sim tracks or layer, which would
+    mean the T3 -> LS -> MD -> hit indices do not line up with the t3_hit_* branches.
     """
-    n_t3 = detId.shape[0]
-    xyz_bits = np.ascontiguousarray(xyz, dtype=np.float32).view(np.int32).astype(np.int64)
-    keys = np.concatenate([detId.astype(np.int64)[:, :, None], xyz_bits], axis=2).reshape(-1, 4)
-    _, first_slot, hit_id = np.unique(keys, axis=0, return_index=True, return_inverse=True)
+    n_t3 = hit_idx.shape[0]
+    _, first_slot, hit_id = np.unique(hit_idx.ravel(), return_index=True, return_inverse=True)
     hit_id = hit_id.reshape(n_t3, 6)
 
     # sim lists of every slot, row-major (t3, slot), as one padded array: distinct, non-negative, largest first
@@ -308,9 +318,9 @@ def build_hit_table(detId: np.ndarray, xyz: np.ndarray, sim_lists: ak.Array, lay
 
     hit_sim_candidates = padded[first_slot]
     if not np.array_equal(hit_sim_candidates[hit_id.ravel()], padded):
-        raise ValueError("Slots with the same (detId, x, y, z) have different sim tracks")
+        raise ValueError("Slots with the same hit index have different sim tracks")
     if not np.array_equal(layer.ravel()[first_slot][hit_id.ravel()], layer.ravel()):
-        raise ValueError("Slots with the same (detId, x, y, z) have different layers")
+        raise ValueError("Slots with the same hit index have different layers")
     return hit_id, hit_sim_candidates
 
 
