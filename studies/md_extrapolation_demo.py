@@ -118,7 +118,7 @@ LINESTYLES = {
 }
 # Log-spaced bin edges at half-integers, so each bin holds whole values of k
 K_BINS = np.concatenate([[0.5], np.unique(np.round(np.logspace(0, 4, 33))) + 0.5])
-DR_BINS = np.logspace(-4, 0, 33)
+DR_BINS = np.logspace(-4, 0.5, 30)
 
 MD_COLUMNS = [
     "md_isPLS",
@@ -1019,7 +1019,7 @@ def plot_summary(
             label=label,
         )
     axs[0].set_xlabel("k: MDs on the layer within dR of the nearest sibling")
-    axs[1].set_xlabel("dR from the center to the nearest sibling")
+    axs[1].set_xlabel(r"$\Delta$R to the nearest sibling")
     axs[0].legend(reverse=True, loc="upper right")
     axs[1].legend(reverse=True, loc="upper left")
     for ax in axs[:2]:
