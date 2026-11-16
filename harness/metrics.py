@@ -18,6 +18,7 @@ SIM_COLUMNS = [
     "sim_q",
     "sim_pt",
     "sim_eta",
+    "sim_phi",
     "sim_vtxperp",
     "sim_vz",
     "sim_bunchCrossing",

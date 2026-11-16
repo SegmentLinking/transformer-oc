@@ -22,6 +22,7 @@ from dataclasses import dataclass
 import awkward as ak
 import matplotlib.pyplot as plt
 import matplotlib.ticker
+from matplotlib import rcParams
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import uproot
@@ -50,16 +51,41 @@ from harness.trackcands import (
     trackcands_from_t5s,
 )
 
-# Where the track candidates come from, and the extra columns each needs
-COLUMNS_OF_TRACKCAND_SOURCE = {
-    "t5": T5_COLUMNS,
-    "mds_matched_to_sim": MDS_MATCHED_TO_SIM_COLUMNS,
-}
-# Columns for matching and metrics, whatever the track candidates
-COLUMNS = HIT_SIMS_FROM_MDS_COLUMNS + SIM_COLUMNS
+# Where the track candidates come from (--trackcands)
+TRACKCAND_SOURCES = ["t5", "mds_matched_to_sim"]
+# Every column any source needs; uproot reads a column listed twice only once
+COLUMNS = (
+    HIT_SIMS_FROM_MDS_COLUMNS + SIM_COLUMNS + T5_COLUMNS + MDS_MATCHED_TO_SIM_COLUMNS
+)
 # Log-spaced from 0.1 to 50 GeV (27 bins), for plots with a log pT axis
 PT_BINS = np.geomspace(0.1, 50.0, 28)
 ETA_BINS = np.linspace(-2.4, 2.4, 25)
+PHI_BINS = np.linspace(-np.pi, np.pi, 25)
+# Plot style
+rcParams.update(
+    {
+        "font.size": 16,
+        "figure.figsize": (8, 8),
+        "xtick.direction": "in",
+        "ytick.direction": "in",
+        "xtick.top": True,
+        "ytick.right": True,
+        "xtick.minor.visible": True,
+        "ytick.minor.visible": True,
+        "axes.grid": True,
+        "axes.grid.which": "both",
+        "grid.linewidth": 0.5,
+        "grid.alpha": 0.1,
+        "grid.color": "gray",
+        "figure.subplot.left": 0.15,
+        "figure.subplot.bottom": 0.09,
+        "figure.subplot.right": 0.97,
+        "figure.subplot.top": 0.95,
+    }
+)
+# Fixed y ranges, so plots of different track candidates can be compared by eye; rates on a log axis
+EFFICIENCY_Y_RANGE = (0.0, 1.02)
+RATE_Y_RANGE = (1e-3, 2.0)
 
 
 @dataclass
@@ -74,9 +100,11 @@ class EventEvaluation:
 
     sim_pt: np.ndarray
     sim_eta: np.ndarray
+    sim_phi: np.ndarray
     sim_isFound: np.ndarray
     trackcand_pt: np.ndarray
     trackcand_eta: np.ndarray
+    trackcand_phi: np.ndarray
     trackcand_isFake: np.ndarray
     trackcand_isDuplicate: np.ndarray
 
@@ -122,7 +150,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--trackcands",
-        choices=list(COLUMNS_OF_TRACKCAND_SOURCE),
+        choices=TRACKCAND_SOURCES,
         default="t5",
         help="where the track candidates come from",
     )
@@ -166,7 +194,7 @@ def evaluate_events(
                 event = read_event(
                     tree=tree,
                     entry=entry,
-                    columns=COLUMNS + COLUMNS_OF_TRACKCAND_SOURCE[trackcand_source],
+                    columns=COLUMNS,
                 )
                 evaluation = evaluate_event(
                     event=event,
@@ -234,9 +262,11 @@ def evaluate_event(
     return EventEvaluation(
         sim_pt=sims["sim_pt"][in_denominator],
         sim_eta=sims["sim_eta"][in_denominator],
+        sim_phi=sims["sim_phi"][in_denominator],
         sim_isFound=(n_trackcands_of_sim > 0)[in_denominator],
         trackcand_pt=trackcands.trackcand_pt,
         trackcand_eta=trackcands.trackcand_eta,
+        trackcand_phi=trackcands.trackcand_phi,
         trackcand_isFake=trackcand_simIdx < 0,
         trackcand_isDuplicate=is_duplicate(
             trackcand_simIdx=trackcand_simIdx,
@@ -265,6 +295,7 @@ def concatenate_evaluations(all_evaluations: list[EventEvaluation]) -> EventEval
     return EventEvaluation(
         sim_pt=np.concatenate([evaluation.sim_pt for evaluation in all_evaluations]),
         sim_eta=np.concatenate([evaluation.sim_eta for evaluation in all_evaluations]),
+        sim_phi=np.concatenate([evaluation.sim_phi for evaluation in all_evaluations]),
         sim_isFound=np.concatenate(
             [evaluation.sim_isFound for evaluation in all_evaluations]
         ),
@@ -273,6 +304,9 @@ def concatenate_evaluations(all_evaluations: list[EventEvaluation]) -> EventEval
         ),
         trackcand_eta=np.concatenate(
             [evaluation.trackcand_eta for evaluation in all_evaluations]
+        ),
+        trackcand_phi=np.concatenate(
+            [evaluation.trackcand_phi for evaluation in all_evaluations]
         ),
         trackcand_isFake=np.concatenate(
             [evaluation.trackcand_isFake for evaluation in all_evaluations]
@@ -316,50 +350,65 @@ def plot_evaluation(
     path: str,
 ) -> None:
     """
-    Efficiency vs sim pT (no pT cut) and vs sim eta; fake and duplicate rate vs track candidate pT and eta.
+    Efficiency vs sim pT (no pT cut), eta and phi; fake and duplicate rate vs track candidate pT, eta and phi.
 
     All in one pdf at path, one plot per page.
     """
     has_pt_cut = evaluation.sim_pt >= DENOMINATOR_PT_MIN
+    pt_cut_label = rf"($p_\mathrm{{T}} \geq {DENOMINATOR_PT_MIN:g}$ GeV)"
     with PdfPages(path) as pdf:
         plot_fraction(
             values=evaluation.sim_pt,
             is_selected=evaluation.sim_isFound,
             bins=PT_BINS,
-            xlabel="sim pT [GeV]",
-            ylabel="efficiency",
+            xlabel=r"Sim. $p_\mathrm{T}$ [GeV]",
+            ylabel="Efficiency",
+            y_range=EFFICIENCY_Y_RANGE,
             pdf=pdf,
             log_x=True,
         )
-        plot_fraction(
-            values=evaluation.sim_eta[has_pt_cut],
-            is_selected=evaluation.sim_isFound[has_pt_cut],
-            bins=ETA_BINS,
-            xlabel=f"sim eta (pT >= {DENOMINATOR_PT_MIN} GeV)",
-            ylabel="efficiency",
-            pdf=pdf,
-        )
-        for flag_name, is_flagged in [
-            ("fake_rate", evaluation.trackcand_isFake),
-            ("duplicate_rate", evaluation.trackcand_isDuplicate),
+        for values, bins, xlabel in [
+            (evaluation.sim_eta, ETA_BINS, rf"Sim. $\eta$ {pt_cut_label}"),
+            (evaluation.sim_phi, PHI_BINS, rf"Sim. $\phi$ {pt_cut_label}"),
+        ]:
+            plot_fraction(
+                values=values[has_pt_cut],
+                is_selected=evaluation.sim_isFound[has_pt_cut],
+                bins=bins,
+                xlabel=xlabel,
+                ylabel="Efficiency",
+                y_range=EFFICIENCY_Y_RANGE,
+                pdf=pdf,
+            )
+        for ylabel, is_flagged in [
+            ("Fake rate", evaluation.trackcand_isFake),
+            ("Duplicate rate", evaluation.trackcand_isDuplicate),
         ]:
             plot_fraction(
                 values=evaluation.trackcand_pt,
                 is_selected=is_flagged,
                 bins=PT_BINS,
-                xlabel="track candidate pT [GeV]",
-                ylabel=flag_name.replace("_", " "),
+                xlabel=r"Track candidate $p_\mathrm{T}$ [GeV]",
+                ylabel=ylabel,
+                y_range=RATE_Y_RANGE,
                 pdf=pdf,
                 log_x=True,
+                log_y=True,
             )
-            plot_fraction(
-                values=evaluation.trackcand_eta,
-                is_selected=is_flagged,
-                bins=ETA_BINS,
-                xlabel="track candidate eta",
-                ylabel=flag_name.replace("_", " "),
-                pdf=pdf,
-            )
+            for values, bins, xlabel in [
+                (evaluation.trackcand_eta, ETA_BINS, r"Track candidate $\eta$"),
+                (evaluation.trackcand_phi, PHI_BINS, r"Track candidate $\phi$"),
+            ]:
+                plot_fraction(
+                    values=values,
+                    is_selected=is_flagged,
+                    bins=bins,
+                    xlabel=xlabel,
+                    ylabel=ylabel,
+                    y_range=RATE_Y_RANGE,
+                    pdf=pdf,
+                    log_y=True,
+                )
     print(f"[plot] path={path}")
 
 
@@ -369,14 +418,18 @@ def plot_fraction(
     bins: np.ndarray,
     xlabel: str,
     ylabel: str,
+    y_range: tuple[float, float],
     pdf: PdfPages,
     log_x: bool = False,
+    log_y: bool = False,
 ) -> None:
     """
-    Per bin of values, the fraction with is_selected (e.g. efficiency: sims, is found), as one page of pdf.
+    Per bin of values, the fraction with is_selected (e.g. efficiency: sims, is found), as one page of pdf, with
+    the y-axis fixed to y_range.
 
-    Error bars are from fraction_and_uncertainty; empty bins are not drawn. With log_x, the x-axis is logarithmic
-    and each point sits at its bin's geometric center, sqrt(low * high), which looks centered on that axis.
+    Error bars are from fraction_and_uncertainty; empty bins are not drawn, nor are zero fractions on a log
+    y-axis. With log_x, the x-axis is logarithmic and each point sits at its bin's geometric center,
+    sqrt(low * high), which looks centered on that axis.
     """
     n_total, _ = np.histogram(values, bins=bins)
     n_selected, _ = np.histogram(values[is_selected], bins=bins)
@@ -403,10 +456,11 @@ def plot_fraction(
         ax.semilogx()
         # Tick labels as plain numbers (0.1, 1, 10), not powers of ten
         ax.xaxis.set_major_formatter(matplotlib.ticker.StrMethodFormatter("{x:g}"))
+    if log_y:
+        ax.semilogy()
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    ax.set_ylim(bottom=0.0)
-    ax.grid(alpha=0.3)
+    ax.set_ylim(y_range)
     pdf.savefig(fig)
     plt.close(fig)
 
