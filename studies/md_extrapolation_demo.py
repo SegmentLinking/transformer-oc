@@ -1026,6 +1026,7 @@ def plot_summary(
         ax.set_xscale("log")
         ax.set_ylabel("(MD of interest, layer) pairs")
         ax.grid(alpha=0.1)
+        ax.xaxis.set_major_formatter(matplotlib.ticker.StrMethodFormatter("{x:g}"))
 
     for name in centers:
         if name == "own":
