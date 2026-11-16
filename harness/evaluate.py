@@ -27,6 +27,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import uproot
 
+from harness.constants import COLUMNS, SIM_COLUMNS
 from harness.events import (
     EVENT_SETS,
     ManifestEvent,
@@ -34,18 +35,15 @@ from harness.events import (
     events_in_set,
     read_manifest,
 )
-from harness.md_truth import HIT_SIMS_FROM_MDS_COLUMNS, hit_sims_from_mds
+from harness.md_truth import hit_sims_from_mds
 from harness.metrics import (
     DENOMINATOR_PT_MIN,
-    SIM_COLUMNS,
     is_denominator,
     is_duplicate,
     n_trackcands_per_sim,
 )
 from harness.trackcand_matching import matched_sim
 from harness.trackcands import (
-    MDS_MATCHED_TO_SIM_COLUMNS,
-    T5_COLUMNS,
     EventTrackCandidates,
     trackcands_from_mds_matched_to_sim,
     trackcands_from_t5s,
@@ -53,10 +51,6 @@ from harness.trackcands import (
 
 # Where the track candidates come from (--trackcands)
 TRACKCAND_SOURCES = ["t5", "mds_matched_to_sim"]
-# Every column any source needs; uproot reads a column listed twice only once
-COLUMNS = (
-    HIT_SIMS_FROM_MDS_COLUMNS + SIM_COLUMNS + T5_COLUMNS + MDS_MATCHED_TO_SIM_COLUMNS
-)
 # Log-spaced from 0.1 to 50 GeV (27 bins), for plots with a log pT axis
 PT_BINS = np.geomspace(0.1, 50.0, 28)
 ETA_BINS = np.linspace(-2.4, 2.4, 25)

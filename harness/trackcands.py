@@ -8,14 +8,6 @@ from dataclasses import dataclass
 import awkward as ak
 import numpy as np
 
-T5_COLUMNS = [
-    "t5_hitIndices",
-    "t5_dnnScore",
-    "t5_pt",
-    "t5_eta",
-    "t5_phi",
-    "t5_isDupBitmask",
-]
 # The hits of the 5 base MDs; t5_hitIndices appends the hits of extension layers after them
 N_T5_BASE_HITS = 10
 # t5_isDupBitmask bits set when LST's T5-T5 duplicate cleaning removes a T5, in its first or second pass
@@ -23,17 +15,6 @@ N_T5_BASE_HITS = 10
 T5_DUPLICATE_CLEANING_BITS = 1 | 2
 # Pads trackcand_hitIndices where a track candidate has fewer hits than the longest; test with hit < 0
 NO_HIT = -999
-# Ground truth from MDs matched to sims: the OT MDs' hits, layer and sim, and the sims' pT, eta and phi
-MDS_MATCHED_TO_SIM_COLUMNS = [
-    "md_isPLS",
-    "md_anchor_hitIdx",
-    "md_other_hitIdx",
-    "md_layer",
-    "md_simIdx",
-    "sim_pt",
-    "sim_eta",
-    "sim_phi",
-]
 # Score of every ground-truth track candidate
 TRUTH_SCORE = 1.0
 

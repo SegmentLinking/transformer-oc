@@ -15,7 +15,6 @@ import awkward as ak
 
 MD_HIT_IDX = ["md_anchor_hitIdx", "md_other_hitIdx"]
 MD_SIM_IDXS = ["md_anchor_simIdxs", "md_other_simIdxs"]
-HIT_SIMS_FROM_MDS_COLUMNS = MD_HIT_IDX + MD_SIM_IDXS + ["md_isPLS"]
 
 
 def hit_sims_from_mds(event: ak.Record) -> dict[int, list[int]]:

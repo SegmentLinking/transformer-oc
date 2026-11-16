@@ -14,16 +14,6 @@ pileup: not a fake, but never a duplicate.
 
 import numpy as np
 
-SIM_COLUMNS = [
-    "sim_q",
-    "sim_pt",
-    "sim_eta",
-    "sim_phi",
-    "sim_vtxperp",
-    "sim_vz",
-    "sim_bunchCrossing",
-    "sim_event",
-]
 DENOMINATOR_PT_MIN = 1.0
 DENOMINATOR_ABS_ETA_MAX = 2.4
 DENOMINATOR_VTXPERP_MAX = 2.5
