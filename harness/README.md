@@ -39,7 +39,8 @@ Each is one small module with its own test, checked against the previous impleme
    candidate: an event has about 60k T5s), and functions that build it from T5s and, later, from a model's output.
 5. **`events.py`:** which events form the train, validation, tuning and test sets, from the manifest. Never
    reshuffled.
-6. **`evaluate_t5.py`:** the first driver: T5s through 1–5, with plots.
+6. **`evaluate.py`:** the driver: track candidates (T5s, or the ground truth from MDs matched to sims, by
+   `--trackcands`) through 1–5, with plots.
 
 Later: comparison at matched efficiency (tune score thresholds on the tuning set), and the decision rule.
 
@@ -48,7 +49,7 @@ Later: comparison at matched efficiency (tune score thresholds on the tuning set
 | Date | Decision |
 |---|---|
 | 2026-11-14 | Track candidates are sets of hits, not MDs: a hit can be in several MDs, and T5s and models then share one path. Revisit if colleagues expect the MD model to report MDs. |
-| 2026-11-14 | Closed 2026-11-15 (was open: whether LST's duplicate-cleaned T5s count). Decided when writing `evaluate_t5.py`: all T5s by default, with `--drop-duplicate-cleaned` to try later (see the 2026-11-15 row). |
+| 2026-11-14 | Closed 2026-11-15 (was open: whether LST's duplicate-cleaned T5s count). Decided when writing `evaluate.py`: all T5s by default, with `--drop-duplicate-cleaned` to try later (see the 2026-11-15 row). |
 | 2026-11-14 | Fake and duplicate follow LST exactly (`write_lst_ntuple.cc`, `performance.cc`): the duplicate rate is over all track candidates. Check: reproduce `t5_isFake` and `t5_isDuplicate`. |
 | 2026-11-14 | Closed (was open: which sims count for duplicates). Evaluate on nominal-mode ntuples. Matching and fakes use every sim, pileup included; duplicates count only stored sims (index < n_sims), which in nominal mode are the hard scatter. The code doesn't depend on the mode: on an all-sim ntuple every sim is stored, and the same code reproduces that file's flags. On 10 nominal events: 69863 / 69863 T5s agree with `t5_isFake`, `t5_isDuplicate` and `t5_simIdx`. |
 | 2026-11-14 | Hit truth comes from OT MDs only (pLS MDs skipped); hits with no sim are left out of the hit → sims map. |
@@ -61,6 +62,7 @@ Later: comparison at matched efficiency (tune score thresholds on the tuning set
 | 2026-11-15 | All T5s are track candidates by default (focus on efficiency and fake rate). `trackcands_from_t5s(drop_duplicate_cleaned=True)` drops those removed by LST's T5-T5 duplicate cleaning (`t5_isDupBitmask` bits 1, 2), to try later. |
 | 2026-11-15 | Track candidate hits are a numpy int array, shape (n_trackcands, n_hits_max), padded with `NO_HIT = -999`, so every `EventTrackCandidates` field is numpy. Strip padding (`hit >= 0`) before matching: a padded slot would count as a hit with no sim. T5s use exactly 10 base hits, so no padding yet. |
 | 2026-11-15 | The manifest records LSTNtuple file names, not paths. The same inputs exist as all-sim ntuples (training) and nominal ntuples (evaluation), with the same names and event order. The harness joins `lstntuple_file` with the nominal directory it's given. Checked: one file entry by entry against both all-sim copies (100 / 100 entries agree on the number of MDs, the number of T5s and the sum of T5 pT), and 84 / 84 manifest events in 28 finished nominal files have as many OT MDs as their `.pt` files. |
+| 2026-11-15 | Ground-truth check of the harness: `trackcands_from_mds_matched_to_sim` makes one track candidate per stored sim from the hits of its OT MDs with `md_simIdx` equal to the sim (both hits from it), optionally requiring `min_layers` unique `md_layer` values. Expect no fakes, and efficiency equal to the fraction of denominator sims with such an MD. A check from hits matched to sims (no MDs) would need per-hit LSTNtuple branches (each OT hit's sims and layer by LST hit index), which the LSTNtuple doesn't have: a change to `write_lst_ntuple.cc`, to raise with colleagues. |
 
 ## Running
 

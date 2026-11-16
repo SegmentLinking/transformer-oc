@@ -1,5 +1,6 @@
 """
-One event's track candidates as per-event arrays, built from LST T5s (and later from a model's output).
+One event's track candidates as per-event arrays, built from LST T5s, from MDs matched to sims (a ground-truth
+check of the harness), and later from a model's output.
 """
 
 from dataclasses import dataclass
@@ -22,6 +23,19 @@ N_T5_BASE_HITS = 10
 T5_DUPLICATE_CLEANING_BITS = 1 | 2
 # Pads trackcand_hitIndices where a track candidate has fewer hits than the longest; test with hit < 0
 NO_HIT = -999
+# Ground truth from MDs matched to sims: the OT MDs' hits, layer and sim, and the sims' pT, eta and phi
+MDS_MATCHED_TO_SIM_COLUMNS = [
+    "md_isPLS",
+    "md_anchor_hitIdx",
+    "md_other_hitIdx",
+    "md_layer",
+    "md_simIdx",
+    "sim_pt",
+    "sim_eta",
+    "sim_phi",
+]
+# Score of every ground-truth track candidate
+TRUTH_SCORE = 1.0
 
 
 @dataclass
@@ -79,4 +93,57 @@ def trackcands_from_t5s(
         trackcand_pt=ak.to_numpy(event["t5_pt"][is_kept]),
         trackcand_eta=ak.to_numpy(event["t5_eta"][is_kept]),
         trackcand_phi=ak.to_numpy(event["t5_phi"][is_kept]),
+    )
+
+
+def trackcands_from_mds_matched_to_sim(
+    event: ak.Record,
+    min_layers: int = 0,
+) -> EventTrackCandidates:
+    """
+    Ground truth: one track candidate per stored sim, made of the hits of the OT MDs matched to the sim
+    (md_simIdx: both hits from that sim). MDs with hits from different sims are left out, though a model could
+    recover them at a matching fraction below 1. pT, eta and phi are the sim's; score TRUTH_SCORE.
+
+    Sims with no such MD, or whose MDs span fewer than min_layers unique layers (md_layer), get no track
+    candidate. Track candidates are in increasing sim index; hits are sorted and padded with NO_HIT.
+    """
+    n_sims = len(event["sim_pt"])
+    is_ot = ~ak.to_numpy(event["md_isPLS"])
+    md_simIdx = ak.to_numpy(event["md_simIdx"])[is_ot].tolist()
+    md_layer = ak.to_numpy(event["md_layer"])[is_ot].tolist()
+    md_anchor_hitIdx = ak.to_numpy(event["md_anchor_hitIdx"])[is_ot].tolist()
+    md_other_hitIdx = ak.to_numpy(event["md_other_hitIdx"])[is_ot].tolist()
+    hits_of_sim = {}
+    layers_of_sim = {}
+    for sim, layer, anchor_hit, other_hit in zip(
+        md_simIdx,
+        md_layer,
+        md_anchor_hitIdx,
+        md_other_hitIdx,
+    ):
+        # Matched to no sim (< 0), or to a pileup sim (no sim_* entries)
+        if sim < 0 or sim >= n_sims:
+            continue
+        if sim not in hits_of_sim:
+            hits_of_sim[sim] = set()
+            layers_of_sim[sim] = set()
+        hits_of_sim[sim].update([anchor_hit, other_hit])
+        layers_of_sim[sim].add(layer)
+    kept_sims = [
+        sim for sim in sorted(hits_of_sim) if len(layers_of_sim[sim]) >= min_layers
+    ]
+    kept_hits = [sorted(hits_of_sim[sim]) for sim in kept_sims]
+    # default=0: an event with no track candidates gives shape (0, 0)
+    n_hits_max = max([len(hits) for hits in kept_hits], default=0)
+    hit_indices = np.full((len(kept_hits), n_hits_max), NO_HIT, dtype=int)
+    for i_trackcand, hits in enumerate(kept_hits):
+        hit_indices[i_trackcand, : len(hits)] = hits
+    kept_sims = np.array(kept_sims, dtype=int)
+    return EventTrackCandidates(
+        trackcand_hitIndices=hit_indices,
+        trackcand_score=np.full(len(kept_sims), TRUTH_SCORE),
+        trackcand_pt=ak.to_numpy(event["sim_pt"])[kept_sims],
+        trackcand_eta=ak.to_numpy(event["sim_eta"])[kept_sims],
+        trackcand_phi=ak.to_numpy(event["sim_phi"])[kept_sims],
     )

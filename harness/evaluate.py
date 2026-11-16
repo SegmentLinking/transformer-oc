@@ -1,15 +1,17 @@
 """
-Evaluate LST T5s as track candidates on one event set: efficiency, fake rate and duplicate rate, as key=value logs and
-pdf plots.
+Evaluate track candidates on one event set: efficiency, fake rate and duplicate rate, as key=value logs and pdf
+plots. The track candidates are LST T5s, or a ground-truth check of the harness from MDs matched to sims
+(--trackcands).
 
 Events come from the manifest; their LSTNtuples are read from a directory of nominal-mode LSTNtuples.
 
 From the repo root:
-apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.evaluate_t5 \
+apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.evaluate \
     --manifest ../transformer-datasets/samples/ttbar/manifest.txt \
     --lstntuple-dir ../transformer-datasets/samples/ttbar \
     --event-set val \
-    --output output/evaluate_t5/val
+    --trackcands t5 \
+    --output output/evaluate/val
 """
 
 import argparse
@@ -40,13 +42,24 @@ from harness.metrics import (
     n_trackcands_per_sim,
 )
 from harness.trackcand_matching import matched_sim
-from harness.trackcands import EventTrackCandidates, T5_COLUMNS, trackcands_from_t5s
+from harness.trackcands import (
+    MDS_MATCHED_TO_SIM_COLUMNS,
+    T5_COLUMNS,
+    EventTrackCandidates,
+    trackcands_from_mds_matched_to_sim,
+    trackcands_from_t5s,
+)
 
-COLUMNS = HIT_SIMS_FROM_MDS_COLUMNS + SIM_COLUMNS + T5_COLUMNS
+# Where the track candidates come from, and the extra columns each needs
+COLUMNS_OF_TRACKCAND_SOURCE = {
+    "t5": T5_COLUMNS,
+    "mds_matched_to_sim": MDS_MATCHED_TO_SIM_COLUMNS,
+}
+# Columns for matching and metrics, whatever the track candidates
+COLUMNS = HIT_SIMS_FROM_MDS_COLUMNS + SIM_COLUMNS
 # Log-spaced from 0.1 to 50 GeV (27 bins), for plots with a log pT axis
 PT_BINS = np.geomspace(0.1, 50.0, 28)
 ETA_BINS = np.linspace(-2.4, 2.4, 25)
-PDF_NAME = "evaluation_t5.pdf"
 
 
 @dataclass
@@ -77,20 +90,22 @@ def main() -> None:
     all_evaluations = evaluate_events(
         events=events,
         lstntuple_dir=args.lstntuple_dir,
+        trackcand_source=args.trackcands,
         drop_duplicate_cleaned=args.drop_duplicate_cleaned,
+        min_layers=args.min_layers,
     )
     evaluation = concatenate_evaluations(all_evaluations=all_evaluations)
     log_totals(evaluation=evaluation, n_events=len(all_evaluations))
     os.makedirs(args.output, exist_ok=True)
     plot_evaluation(
         evaluation=evaluation,
-        path=os.path.join(args.output, PDF_NAME),
+        path=os.path.join(args.output, f"evaluation_{args.trackcands}.pdf"),
     )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate LST T5s as track candidates on one event set."
+        description="Evaluate track candidates on one event set."
     )
     parser.add_argument(
         "--manifest", required=True, help="manifest.txt from md_processing.py"
@@ -106,14 +121,26 @@ def parse_args() -> argparse.Namespace:
         help="evaluate only the first N events of the set",
     )
     parser.add_argument(
+        "--trackcands",
+        choices=list(COLUMNS_OF_TRACKCAND_SOURCE),
+        default="t5",
+        help="where the track candidates come from",
+    )
+    parser.add_argument(
         "--drop-duplicate-cleaned",
         action="store_true",
-        help="drop T5s removed by LST's T5-T5 duplicate cleaning",
+        help="t5 only: drop T5s removed by LST's T5-T5 duplicate cleaning",
+    )
+    parser.add_argument(
+        "--min-layers",
+        type=int,
+        default=0,
+        help="mds_matched_to_sim only: keep sims whose MDs span at least this many layers",
     )
     parser.add_argument(
         "--output",
         required=True,
-        help=f"directory for the plots, written as {PDF_NAME}",
+        help="directory for the plots, written as evaluation_<trackcands>.pdf",
     )
     return parser.parse_args()
 
@@ -121,7 +148,9 @@ def parse_args() -> argparse.Namespace:
 def evaluate_events(
     events: list[ManifestEvent],
     lstntuple_dir: str,
+    trackcand_source: str,
     drop_duplicate_cleaned: bool,
+    min_layers: int,
 ) -> list[EventEvaluation]:
     """
     Evaluate every event, opening each LSTNtuple once and reading its entries one at a time.
@@ -137,11 +166,13 @@ def evaluate_events(
                 event = read_event(
                     tree=tree,
                     entry=entry,
-                    columns=COLUMNS,
+                    columns=COLUMNS + COLUMNS_OF_TRACKCAND_SOURCE[trackcand_source],
                 )
                 evaluation = evaluate_event(
                     event=event,
+                    trackcand_source=trackcand_source,
                     drop_duplicate_cleaned=drop_duplicate_cleaned,
+                    min_layers=min_layers,
                 )
                 all_evaluations.append(evaluation)
                 print(
@@ -174,15 +205,23 @@ def read_event(
 
 def evaluate_event(
     event: ak.Record,
+    trackcand_source: str,
     drop_duplicate_cleaned: bool,
+    min_layers: int,
 ) -> EventEvaluation:
     """
-    One event: build its track candidates from T5s, match each to a sim, and flag found sims, fakes and duplicates.
+    One event: build its track candidates, match each to a sim, and flag found sims, fakes and duplicates.
     """
-    trackcands = trackcands_from_t5s(
-        event=event,
-        drop_duplicate_cleaned=drop_duplicate_cleaned,
-    )
+    if trackcand_source == "t5":
+        trackcands = trackcands_from_t5s(
+            event=event,
+            drop_duplicate_cleaned=drop_duplicate_cleaned,
+        )
+    else:
+        trackcands = trackcands_from_mds_matched_to_sim(
+            event=event,
+            min_layers=min_layers,
+        )
     hit_sims = hit_sims_from_mds(event=event)
     trackcand_simIdx = match_trackcands(trackcands=trackcands, hit_sims=hit_sims)
     sims = {column: ak.to_numpy(event[column]) for column in SIM_COLUMNS}

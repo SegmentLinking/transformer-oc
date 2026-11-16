@@ -7,7 +7,11 @@ apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.test_trackca
 
 import awkward as ak
 
-from harness.trackcands import trackcands_from_t5s
+from harness.trackcands import (
+    NO_HIT,
+    trackcands_from_mds_matched_to_sim,
+    trackcands_from_t5s,
+)
 
 # T5 0: 10 hits, never removed
 # T5 1: 12 hits (2 from an extension layer), cross-cleaned against a pT5/pT3 (bit 4)
@@ -84,6 +88,55 @@ def test_trackcands_from_t5s_rejects_t5_with_too_few_hits():
     except ValueError:
         return
     raise AssertionError("expected a ValueError for a T5 with 9 hits")
+
+
+# Three stored sims (0, 1, 2); sim 7 is pileup (index >= 3)
+# MD 0: layer 1, hits 10 and 11, matched to sim 0
+# MD 1: layer 2, hits 12 and 13, matched to sim 0
+# MD 2: layer 2, hits 14 and 15, matched to sim 1
+# MD 3: layer 3, hits 16 and 17, matched to no sim (e.g. one hit from sim 1, one from sim 2)
+# MD 4: layer 4, hits 18 and 19, matched to pileup sim 7
+# MD 5: pLS, hits 20 and 21, matched to sim 0; skipped
+MD_EVENT = ak.Record(
+    {
+        "md_isPLS": [False, False, False, False, False, True],
+        "md_anchor_hitIdx": [10, 12, 14, 16, 18, 20],
+        "md_other_hitIdx": [11, 13, 15, 17, 19, 21],
+        "md_layer": [1, 2, 2, 3, 4, 0],
+        "md_simIdx": [0, 0, 1, -999, 7, 0],
+        "sim_pt": [1.5, 2.5, 3.5],
+        "sim_eta": [0.1, 0.2, 0.3],
+        "sim_phi": [-1.0, 0.0, 1.0],
+    }
+)
+
+
+def test_trackcands_from_mds_matched_to_sim():
+    # Sim 2 has no MD matched to it; pileup sim 7 and the unmatched MD give no track candidate
+    trackcands = trackcands_from_mds_matched_to_sim(event=MD_EVENT)
+    assert trackcands.trackcand_hitIndices.tolist() == [
+        [10, 11, 12, 13],
+        [14, 15, NO_HIT, NO_HIT],
+    ]
+    assert trackcands.trackcand_score.tolist() == [1.0, 1.0]
+    assert trackcands.trackcand_pt.tolist() == [1.5, 2.5]
+    assert trackcands.trackcand_eta.tolist() == [0.1, 0.2]
+    assert trackcands.trackcand_phi.tolist() == [-1.0, 0.0]
+
+
+def test_trackcands_from_mds_matched_to_sim_min_layers():
+    # Sim 0's MDs span layers 1 and 2; sim 1's only layer 2
+    trackcands = trackcands_from_mds_matched_to_sim(
+        event=MD_EVENT,
+        min_layers=2,
+    )
+    assert trackcands.trackcand_pt.tolist() == [1.5]
+    trackcands = trackcands_from_mds_matched_to_sim(
+        event=MD_EVENT,
+        min_layers=3,
+    )
+    assert trackcands.trackcand_hitIndices.shape == (0, 0)
+    assert trackcands.trackcand_pt.tolist() == []
 
 
 if __name__ == "__main__":
