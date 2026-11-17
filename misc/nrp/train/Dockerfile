@@ -1,3 +1,10 @@
+#
+# How to build an image and push it to DockerHub:
+# DEST=alexandertuna
+# git clone https://github.com/SegmentLinking/transformer-oc.git
+# docker builder prune # free up space as needed
+# docker buildx build --platform linux/amd64 -t ${DEST}/ml-tracking:$(date +%F) -t ${DEST}/ml-tracking:latest --push transformer-oc/misc/nrp/train
+#
 FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
 
 RUN apt-get update && apt-get install -y wget git python3 python3-pip emacs-nox
