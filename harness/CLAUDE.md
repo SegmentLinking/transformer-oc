@@ -23,15 +23,30 @@ decisions, is `README.md`. Update its Decisions table whenever a decision is mad
 - **Name per-track-candidate arrays like LST branches:** `trackcand_simIdx` after `t5_simIdx`,
   `trackcand_hitIndices` after `t5_hitIndices`.
 - **Build piece by piece, bottom-up.** One small module at a time, each with its own `test_<module>.py`
-  (plain asserts, runnable without pytest). Propose the outline (signatures and docstrings) first, then the
+  (pytest; `pytest.raises` for expected errors). Propose the outline (signatures and docstrings) first, then the
   bodies, and wait for review between pieces.
+
+## Open questions for colleagues
+
+Ask soon; don't sweep under the rug. When one is answered, record the answer in the README's Decisions table and
+remove it here.
+
+1. **`t5_pMatched` ignores extension hits.** It is computed from the 10 base hits (5 base MDs), while extended
+   T5s store 12–14 hits in `t5_hitIndices`. Matching on all stored hits changes the matched sim for 0.6% of
+   extended T5s (312 of 54329, 10 events). Is base-hit matching intended? Which does the tracking group use for
+   T5 efficiency and fake rate?
+2. **Hits of unsaved secondaries attributed to the parent sim?** 11% of prompt hard-scatter sims with pT ≥ 0.8
+   GeV have an MD far off their helix (|Δφ| > 0.1 or |Δz| > 15 cm), often a second MD on a layer where the sim
+   already has an on-helix one, and neutral sims (n, K0L, Λ) own MDs. Is CMSSW attributing hits of untracked
+   secondaries (δ-rays, interaction products) to the parent TrackingParticle? Does LST's efficiency definition
+   treat such hits specially?
 
 ## Running
 
 From the repo root, inside the Apptainer image:
 
 ```bash
-apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.test_<module>
+apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m pytest harness/test_<module>.py
 ```
 
 Scripts that import `harness` from outside the repo (e.g. scratch checks) need
