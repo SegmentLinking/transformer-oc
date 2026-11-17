@@ -18,7 +18,7 @@ def best_sim(
     """
     The sim with the most of the track candidate's unique hits, and its fraction of them.
 
-    hit_sims is the map from md_truth.hit_sims_from_mds. On a tie between sims, the smaller sim index wins.
+    hit_sims maps an LST hit index to its sim indices. On a tie between sims, the smaller sim index wins.
 
     Returns (UNMATCHED, 0.0) when hits with no sim outnumber the best sim, or tie with it and come first (LST
     breaks ties by first appearance in the hit list), which includes the case where no hit has a sim.

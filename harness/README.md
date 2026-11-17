@@ -7,9 +7,9 @@ This file is the living design note: update it whenever a decision is made or ch
 
 ## What goes in
 
-- **Track candidates**, per event: each track candidate is a set of LST hit indices, a score, and reconstructed pT,
-  η and φ.
-- **Truth**, from the LSTNtuple of the same event: the sims each hit belongs to, and the sims' properties. Use
+- **Track candidates**, per event: each track candidate is a set of LST hit indices, its matched sim, a score, and
+  reconstructed pT, η and φ. Each builder assigns the sim from its own source (T5s: LST's `t5_simIdx`).
+- **Truth**, from the LSTNtuple of the same event: the sims' properties, for the efficiency denominator. Use
   ntuples made in LST's nominal mode (`all_sim_tracks` off): they store only the hard-scatter sims, as the first
   n_sims entries of the full sim list, while per-hit sim indices refer to the full list. So a sim index >= n_sims
   (the length of the `sim_*` branches) is pileup, and a track candidate's matched sim can be beyond `sim_*`.
@@ -29,18 +29,18 @@ All on a fixed set of events, as `[tag] key=value` logs and pdf plots.
 
 Each is one small module with its own test, checked against the previous implementation on the same events.
 
-1. **`md_truth.py`:** which sims each OT hit belongs to, from the ntuple's per-hit MD branches (pLS MDs skipped).
-2. **`trackcand_matching.py`:** over a track candidate's unique hits, count the hits of each sim (a hit with two
-   sims counts for both). The track candidate matches a sim with more than 75% of its hits, as LST.
-   Check: reproduce LST's `t5_simIdx`.
-3. **`metrics.py`:** the efficiency denominator (LST's type 7: charged, pT ≥ 1 GeV, |η| ≤ 2.4, vertex near the
+1. **`trackcand_matching.py`:** over a track candidate's unique hits, count the hits of each sim (a hit with two
+   sims counts for both). The track candidate matches a sim with more than 75% of its hits, as LST. Given a map
+   from hit index to sims. Not used by T5s or the ground truth, which carry their own sim; kept for the MD model.
+   Check: reproduced LST's `t5_simIdx`.
+2. **`metrics.py`:** the efficiency denominator (LST's type 7: charged, pT ≥ 1 GeV, |η| ≤ 2.4, vertex near the
    beam spot, hard scatter), then efficiency, fake rate and duplicate rate from the matches.
-4. **`trackcands.py`:** an `EventTrackCandidates` dataclass of per-event arrays (not one object per track
+3. **`trackcands.py`:** an `EventTrackCandidates` dataclass of per-event arrays (not one object per track
    candidate: an event has about 60k T5s), and functions that build it from T5s and, later, from a model's output.
-5. **`events.py`:** which LSTNtuple files form a dataset, from its file list (`train.txt`, `val.txt` or `test.txt`
+4. **`events.py`:** which LSTNtuple files form a dataset, from its file list (`train.txt`, `val.txt` or `test.txt`
    from `md_processing.py`). Never reshuffled.
-6. **`evaluate.py`:** the driver: track candidates (T5s, or the ground truth from MDs matched to sims, by
-   `--trackcands`) through 1–5, with plots.
+5. **`evaluate.py`:** the driver: track candidates (T5s, or the ground truth from MDs matched to sims, by
+   `--trackcands`) through 2–4, with plots.
 
 Later: comparison at matched efficiency (tune score thresholds on the training set), and the decision rule.
 
@@ -52,9 +52,9 @@ Later: comparison at matched efficiency (tune score thresholds on the training s
 | 2026-11-14 | Closed 2026-11-15 (was open: whether LST's duplicate-cleaned T5s count). Decided when writing `evaluate.py`: all T5s by default, with `--drop-duplicate-cleaned` to try later (see the 2026-11-15 row). |
 | 2026-11-14 | Fake and duplicate follow LST exactly (`write_lst_ntuple.cc`, `performance.cc`): the duplicate rate is over all track candidates. Check: reproduce `t5_isFake` and `t5_isDuplicate`. |
 | 2026-11-14 | Closed (was open: which sims count for duplicates). Evaluate on nominal-mode ntuples. Matching and fakes use every sim, pileup included; duplicates count only stored sims (index < n_sims), which in nominal mode are the hard scatter. The code doesn't depend on the mode: on an all-sim ntuple every sim is stored, and the same code reproduces that file's flags. On 10 nominal events: 69863 / 69863 T5s agree with `t5_isFake`, `t5_isDuplicate` and `t5_simIdx`. |
-| 2026-11-14 | Hit truth comes from OT MDs only (pLS MDs skipped); hits with no sim are left out of the hit → sims map. |
+| 2026-11-14 | Superseded 2026-11-17 (see that row). Hit truth comes from OT MDs only (pLS MDs skipped); hits with no sim are left out of the hit → sims map. |
 | 2026-11-14 | Unmatched is written as `UNMATCHED = -999` (LST's value) but always tested as `sim < 0`, since LST code uses several negative values. |
-| 2026-11-14 | Track candidates are matched one at a time (a Python loop); revisit if it's too slow. |
+| 2026-11-14 | Superseded 2026-11-17 (no matching in `evaluate.py`). Track candidates are matched one at a time (a Python loop); revisit if it's too slow. |
 | 2026-11-14 | Matching must reproduce LST's `t5_simIdx` exactly, unless LST colleagues say it shouldn't. |
 | 2026-11-14 | `best_sim` also reproduces LST's pMatched exactly: hits with no sim compete as one more "sim" (fraction 0 if they outnumber the best sim, or tie and appear first). Costs order dependence in that tie; never changes a match. On 10 events: 15534 / 15534 5-layer T5s agree with `t5_pMatched`. |
 | 2026-11-14 | Rebuilt piece by piece with review; the previous version is kept outside the repo for comparison. |
@@ -64,6 +64,7 @@ Later: comparison at matched efficiency (tune score thresholds on the training s
 | 2026-11-15 | The manifest records LSTNtuple file names, not paths. The same inputs exist as all-sim ntuples (training) and nominal ntuples (evaluation), with the same names and event order. The harness joins `lstntuple_file` with the nominal directory it's given. Checked: one file entry by entry against both all-sim copies (100 / 100 entries agree on the number of MDs, the number of T5s and the sum of T5 pT), and 84 / 84 manifest events in 28 finished nominal files have as many OT MDs as their `.pt` files. |
 | 2026-11-15 | Ground-truth check of the harness: `trackcands_from_mds_matched_to_sim` makes one track candidate per stored sim from the hits of its OT MDs with `md_simIdx` equal to the sim (both hits from it), optionally requiring `min_layers` unique `md_layer` values. Expect no fakes, and efficiency equal to the fraction of denominator sims with such an MD. A check from hits matched to sims (no MDs) would need per-hit LSTNtuple branches (each OT hit's sims and layer by LST hit index), which the LSTNtuple doesn't have: a change to `write_lst_ntuple.cc`, to raise with colleagues. |
 | 2026-11-16 | Datasets are made of whole LSTNtuple files (agreed with Jade): `md_processing.py` shuffles the name-sorted files with the seed and cuts 70 / 15 / 15% of files into train / val / test (30 / 7 / 7 of 44). Each dataset has a file list (`train.txt`, `val.txt`, `test.txt`: one LSTNtuple file name per line, replacing the manifest on 2026-11-17), and the harness evaluates every entry of the listed files (`--file-list`, `--n-files`). No tuning set: thresholds are tuned on train, since the datasets are large and more can be produced. |
+| 2026-11-17 | Each track candidate builder assigns its track candidates' sims from its own source, so sources of truth are never mixed: T5s take LST's `t5_simIdx`, and each ground-truth track candidate the sim it was built from. `evaluate.py` no longer matches hits to sims, and `md_truth.py` (`hit_sims_from_mds`) is deleted: its map covered only hits in OT MDs, not every hit as a global hit → sims map (LST's `matchedSimTrkIdxsAndFracs`) would, and the name hid that. The harness's own matching reproduced `t5_simIdx` for 4,851,284 / 4,851,284 T5s (660 events), and on one val file both T5 and ground-truth totals are unchanged; the T5 run takes 11 s instead of 51 s. `trackcand_matching.py` stays for the MD model, whose hit → sims map should come from `md_anchor_simIdxs` / `md_other_simIdxs` (kept in `MD_COLUMNS`). |
 
 ## Running
 

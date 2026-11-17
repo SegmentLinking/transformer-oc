@@ -30,16 +30,13 @@ import uproot
 
 from harness.constants import COLUMNS, SIM_COLUMNS
 from harness.events import read_file_list
-from harness.md_truth import hit_sims_from_mds
 from harness.metrics import (
     DENOMINATOR_PT_MIN,
     is_denominator,
     is_duplicate,
     n_trackcands_per_sim,
 )
-from harness.trackcand_matching import matched_sim
 from harness.trackcands import (
-    EventTrackCandidates,
     trackcands_from_mds_matched_to_sim,
     trackcands_from_t5s,
 )
@@ -232,7 +229,8 @@ def evaluate_event(
     min_layers: int,
 ) -> Performance:
     """
-    One event: build its track candidates, match each to a sim, and flag found sims, fakes and duplicates.
+    One event: build its track candidates, each with its sim from its source, and flag found sims, fakes and
+    duplicates.
     """
     if trackcand_source == "t5":
         trackcands = trackcands_from_t5s(
@@ -244,8 +242,7 @@ def evaluate_event(
             event=event,
             min_layers=min_layers,
         )
-    hit_sims = hit_sims_from_mds(event=event)
-    trackcand_simIdx = match_trackcands(trackcands=trackcands, hit_sims=hit_sims)
+    trackcand_simIdx = trackcands.trackcand_simIdx
     sims = {column: ak.to_numpy(event[column]) for column in SIM_COLUMNS}
     n_trackcands_of_sim = n_trackcands_per_sim(
         trackcand_simIdx=trackcand_simIdx,
@@ -266,21 +263,6 @@ def evaluate_event(
             trackcand_simIdx=trackcand_simIdx,
             n_trackcands_of_sim=n_trackcands_of_sim,
         ),
-    )
-
-
-def match_trackcands(
-    trackcands: EventTrackCandidates,
-    hit_sims: dict[int, list[int]],
-) -> np.ndarray:
-    """Each track candidate's matched sim index, shape (n_trackcands,), with NO_HIT padding stripped first."""
-    # dtype=int keeps an event with no track candidates an int array
-    return np.array(
-        [
-            matched_sim(hits=hits[hits >= 0].tolist(), hit_sims=hit_sims)
-            for hits in trackcands.trackcand_hitIndices
-        ],
-        dtype=int,
     )
 
 
