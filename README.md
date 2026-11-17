@@ -5,8 +5,8 @@
 Run everything inside the `ml-tracking` image, which has torch and other libraries. Building it yourself is optional: the Dockerfile is in `misc/nrp/train/`. You can download it locally with:
 
 ```
-APPTAINER_TMPDIR=${HOME}/apptainer/tmp
-APPTAINER_CACHEDIR=${HOME}/apptainer/cache
+export APPTAINER_TMPDIR=${HOME}/apptainer/tmp
+export APPTAINER_CACHEDIR=${HOME}/apptainer/cache
 mkdir -p ${APPTAINER_TMPDIR} ${APPTAINER_CACHEDIR}
 apptainer build ml-tracking.sif docker://alexandertuna/ml-tracking:latest
 ```
