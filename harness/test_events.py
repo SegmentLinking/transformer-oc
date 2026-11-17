@@ -1,12 +1,14 @@
 """
-Tests for harness/events.py (plain asserts; runs without pytest).
+Tests for harness/events.py.
 
 From the repo root:
-apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.test_events
+apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m pytest harness/test_events.py
 """
 
 import os
 import tempfile
+
+import pytest
 
 from harness.events import (
     ManifestEvent,
@@ -65,11 +67,8 @@ def test_events_in_set():
 
 def test_events_in_set_rejects_unknown_set():
     events = read_test_manifest()
-    try:
+    with pytest.raises(ValueError):
         events_in_set(events=events, event_set="validation")
-    except ValueError:
-        return
-    raise AssertionError("expected a ValueError for event_set=validation")
 
 
 def test_entries_by_lstntuple():
@@ -80,10 +79,3 @@ def test_entries_by_lstntuple():
         "a.root": [0, 1],
     }
     assert list(entries_by_lstntuple(events=events)) == ["b.root", "a.root"]
-
-
-if __name__ == "__main__":
-    for name, func in list(globals().items()):
-        if name.startswith("test_"):
-            func()
-            print(f"[test] name={name} result=passed")

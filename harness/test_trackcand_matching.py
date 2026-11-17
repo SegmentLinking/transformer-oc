@@ -1,8 +1,8 @@
 """
-Tests for harness/trackcand_matching.py (plain asserts; runs without pytest).
+Tests for harness/trackcand_matching.py.
 
 From the repo root:
-apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.test_trackcand_matching
+apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m pytest harness/test_trackcand_matching.py
 """
 
 from harness.trackcand_matching import UNMATCHED, best_sim, matched_sim
@@ -66,10 +66,3 @@ def test_matched_sim_needs_strictly_more_than_the_fraction():
     # 3 of 4 = 0.75 exactly: not matched (strict, as LST)
     assert matched_sim(hits=[1, 2, 3, 10], hit_sims=HIT_SIMS) == UNMATCHED
     assert matched_sim(hits=[10], hit_sims=HIT_SIMS) == UNMATCHED
-
-
-if __name__ == "__main__":
-    for name, func in list(globals().items()):
-        if name.startswith("test_"):
-            func()
-            print(f"[test] name={name} result=passed")

@@ -1,11 +1,12 @@
 """
-Tests for harness/trackcands.py (plain asserts; runs without pytest).
+Tests for harness/trackcands.py.
 
 From the repo root:
-apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.test_trackcands
+apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m pytest harness/test_trackcands.py
 """
 
 import awkward as ak
+import pytest
 
 from harness.trackcands import (
     NO_HIT,
@@ -64,11 +65,8 @@ def test_trackcands_from_t5s_drop_duplicate_cleaned():
 def test_trackcands_from_t5s_rejects_several_events():
     # Two events: an ak.Array, not an ak.Record
     events = ak.Array([EVENT.tolist(), EVENT.tolist()])
-    try:
+    with pytest.raises(TypeError):
         trackcands_from_t5s(event=events)
-    except TypeError:
-        return
-    raise AssertionError("expected a TypeError for an ak.Array of events")
 
 
 def test_trackcands_from_t5s_rejects_t5_with_too_few_hits():
@@ -83,11 +81,8 @@ def test_trackcands_from_t5s_rejects_t5_with_too_few_hits():
             "t5_isDupBitmask": [0, 0],
         }
     )
-    try:
+    with pytest.raises(ValueError):
         trackcands_from_t5s(event=event)
-    except ValueError:
-        return
-    raise AssertionError("expected a ValueError for a T5 with 9 hits")
 
 
 # Three stored sims (0, 1, 2); sim 7 is pileup (index >= 3)
@@ -137,10 +132,3 @@ def test_trackcands_from_mds_matched_to_sim_min_layers():
     )
     assert trackcands.trackcand_hitIndices.shape == (0, 0)
     assert trackcands.trackcand_pt.tolist() == []
-
-
-if __name__ == "__main__":
-    for name, func in list(globals().items()):
-        if name.startswith("test_"):
-            func()
-            print(f"[test] name={name} result=passed")

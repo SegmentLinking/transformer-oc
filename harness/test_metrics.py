@@ -1,8 +1,8 @@
 """
-Tests for harness/metrics.py (plain asserts; runs without pytest).
+Tests for harness/metrics.py.
 
 From the repo root:
-apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.test_metrics
+apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m pytest harness/test_metrics.py
 """
 
 import numpy as np
@@ -63,10 +63,3 @@ def test_is_duplicate():
         n_trackcands_of_sim=n_trackcands_of_sim,
     )
     assert duplicate.tolist() == [True, True, False, False, False, False]
-
-
-if __name__ == "__main__":
-    for name, func in list(globals().items()):
-        if name.startswith("test_"):
-            func()
-            print(f"[test] name={name} result=passed")

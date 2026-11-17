@@ -1,11 +1,12 @@
 """
-Tests for harness/md_truth.py (plain asserts; runs without pytest).
+Tests for harness/md_truth.py.
 
 From the repo root:
-apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.test_md_truth
+apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m pytest harness/test_md_truth.py
 """
 
 import awkward as ak
+import pytest
 
 from harness.md_truth import hit_sims_from_mds
 
@@ -38,15 +39,5 @@ def test_hit_sims_from_mds_rejects_several_events():
     }
     # Two events: an ak.Array, not an ak.Record
     events = ak.Array([event, event])
-    try:
+    with pytest.raises(TypeError):
         hit_sims_from_mds(event=events)
-    except TypeError:
-        return
-    raise AssertionError("expected a TypeError for an ak.Array of events")
-
-
-if __name__ == "__main__":
-    test_hit_sims_from_mds()
-    print("[test] name=test_hit_sims_from_mds result=passed")
-    test_hit_sims_from_mds_rejects_several_events()
-    print("[test] name=test_hit_sims_from_mds_rejects_several_events result=passed")
