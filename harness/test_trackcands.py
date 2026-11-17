@@ -24,6 +24,7 @@ EVENT = ak.Record(
             list(range(10, 22)),
             list(range(30, 40)),
         ],
+        "t5_simIdx": [3, -999, 5],
         "t5_dnnScore": [0.9, 0.8, 0.7],
         "t5_pt": [1.5, 2.5, 3.5],
         "t5_eta": [0.1, 0.2, 0.3],
@@ -40,6 +41,7 @@ def test_trackcands_from_t5s_keeps_every_t5():
         list(range(10, 20)),
         list(range(30, 40)),
     ]
+    assert trackcands.trackcand_simIdx.tolist() == [3, -999, 5]
     assert trackcands.trackcand_score.tolist() == [0.9, 0.8, 0.7]
     assert trackcands.trackcand_pt.tolist() == [1.5, 2.5, 3.5]
     assert trackcands.trackcand_eta.tolist() == [0.1, 0.2, 0.3]
@@ -56,6 +58,7 @@ def test_trackcands_from_t5s_drop_duplicate_cleaned():
         list(range(0, 10)),
         list(range(10, 20)),
     ]
+    assert trackcands.trackcand_simIdx.tolist() == [3, -999]
     assert trackcands.trackcand_score.tolist() == [0.9, 0.8]
     assert trackcands.trackcand_pt.tolist() == [1.5, 2.5]
     assert trackcands.trackcand_eta.tolist() == [0.1, 0.2]
@@ -74,6 +77,7 @@ def test_trackcands_from_t5s_rejects_t5_with_too_few_hits():
     event = ak.Record(
         {
             "t5_hitIndices": [list(range(0, 10)), list(range(10, 19))],
+            "t5_simIdx": [3, 4],
             "t5_dnnScore": [0.9, 0.8],
             "t5_pt": [1.5, 2.5],
             "t5_eta": [0.1, 0.2],
@@ -113,6 +117,7 @@ def test_trackcands_from_mds_matched_to_sim():
         [10, 11, 12, 13],
         [14, 15, NO_HIT, NO_HIT],
     ]
+    assert trackcands.trackcand_simIdx.tolist() == [0, 1]
     assert trackcands.trackcand_score.tolist() == [1.0, 1.0]
     assert trackcands.trackcand_pt.tolist() == [1.5, 2.5]
     assert trackcands.trackcand_eta.tolist() == [0.1, 0.2]
@@ -125,10 +130,12 @@ def test_trackcands_from_mds_matched_to_sim_min_layers():
         event=MD_EVENT,
         min_layers=2,
     )
+    assert trackcands.trackcand_simIdx.tolist() == [0]
     assert trackcands.trackcand_pt.tolist() == [1.5]
     trackcands = trackcands_from_mds_matched_to_sim(
         event=MD_EVENT,
         min_layers=3,
     )
     assert trackcands.trackcand_hitIndices.shape == (0, 0)
+    assert trackcands.trackcand_simIdx.tolist() == []
     assert trackcands.trackcand_pt.tolist() == []

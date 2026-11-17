@@ -25,9 +25,12 @@ class EventTrackCandidates:
     One event's track candidates: entry i of every field belongs to track candidate i.
 
     trackcand_hitIndices has shape (n_trackcands, n_hits_max), padded with NO_HIT; the others (n_trackcands,).
+    trackcand_simIdx is the matched sim, < 0 for none, from the track candidate's own source: LST's t5_simIdx for
+    T5s, and the sim it was built from for the ground truth.
     """
 
     trackcand_hitIndices: np.ndarray
+    trackcand_simIdx: np.ndarray
     trackcand_score: np.ndarray
     trackcand_pt: np.ndarray
     trackcand_eta: np.ndarray
@@ -39,7 +42,8 @@ def trackcands_from_t5s(
     drop_duplicate_cleaned: bool = False,
 ) -> EventTrackCandidates:
     """
-    The event's T5s as track candidates: their base hits, score t5_dnnScore, and t5_pt, t5_eta, t5_phi.
+    The event's T5s as track candidates: their base hits, sim t5_simIdx, score t5_dnnScore, and t5_pt, t5_eta,
+    t5_phi.
 
     By default every T5 is kept. With drop_duplicate_cleaned, T5s removed by LST's T5-T5 duplicate cleaning
     (any of T5_DUPLICATE_CLEANING_BITS set in t5_isDupBitmask) are dropped.
@@ -70,6 +74,7 @@ def trackcands_from_t5s(
     )
     return EventTrackCandidates(
         trackcand_hitIndices=ak.to_numpy(ak.fill_none(base_hits, NO_HIT)),
+        trackcand_simIdx=ak.to_numpy(event["t5_simIdx"][is_kept]),
         trackcand_score=ak.to_numpy(event["t5_dnnScore"][is_kept]),
         trackcand_pt=ak.to_numpy(event["t5_pt"][is_kept]),
         trackcand_eta=ak.to_numpy(event["t5_eta"][is_kept]),
@@ -123,6 +128,7 @@ def trackcands_from_mds_matched_to_sim(
     kept_sims = np.array(kept_sims, dtype=int)
     return EventTrackCandidates(
         trackcand_hitIndices=hit_indices,
+        trackcand_simIdx=kept_sims,
         trackcand_score=np.full(len(kept_sims), TRUTH_SCORE),
         trackcand_pt=ak.to_numpy(event["sim_pt"])[kept_sims],
         trackcand_eta=ak.to_numpy(event["sim_eta"])[kept_sims],
