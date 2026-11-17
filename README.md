@@ -1,5 +1,16 @@
 # Transformer OC
 
+# 0) Environment
+
+Run everything inside the `ml-tracking` image, which has torch and other libraries. Building it yourself is optional: the Dockerfile is in `misc/nrp/train/`. You can download it locally with:
+
+```
+APPTAINER_TMPDIR=${HOME}/apptainer/tmp
+APPTAINER_CACHEDIR=${HOME}/apptainer/cache
+mkdir -p ${APPTAINER_TMPDIR} ${APPTAINER_CACHEDIR}
+apptainer build ml-tracking.sif docker://alexandertuna/ml-tracking:latest
+```
+
 # 1) Data processing
 
 Run one of the preprocessing scripts to create graph datasets (one graph per event). For example:
