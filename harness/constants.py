@@ -23,6 +23,7 @@ MD_COLUMNS = [
 ]
 T5_COLUMNS = [
     "t5_hitIndices",
+    "t5_simIdx",
     "t5_dnnScore",
     "t5_pt",
     "t5_eta",
