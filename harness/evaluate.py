@@ -1,15 +1,16 @@
 """
-Evaluate track candidates on one event set: efficiency, fake rate and duplicate rate, as key=value logs and pdf
+Evaluate track candidates' performance on one dataset: efficiency, fake rate and duplicate rate, as key=value logs and pdf
 plots. The track candidates are LST T5s, or a ground-truth check of the harness from MDs matched to sims
 (--trackcands).
 
-Events come from the manifest; their LSTNtuples are read from a directory of nominal-mode LSTNtuples.
+The dataset's LSTNtuple files come from its file list (val.txt from md_processing.py), and are read from a directory
+of nominal-mode LSTNtuples.
+Every event of each file is evaluated.
 
 From the repo root:
 apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.evaluate \
-    --manifest ../transformer-datasets/samples/ttbar/manifest.txt \
-    --lstntuple-dir ../transformer-datasets/samples/ttbar \
-    --event-set val \
+    --file-list ../transformer-datasets/samples/ttbar/val.txt \
+    --lstntuple-dir ../transformer-datasets/samples/ttbar/nominal \
     --trackcands t5 \
     --output output/evaluate/val
 """
@@ -28,13 +29,7 @@ import numpy as np
 import uproot
 
 from harness.constants import COLUMNS, SIM_COLUMNS
-from harness.events import (
-    EVENT_SETS,
-    ManifestEvent,
-    entries_by_lstntuple,
-    events_in_set,
-    read_manifest,
-)
+from harness.events import read_file_list
 from harness.md_truth import hit_sims_from_mds
 from harness.metrics import (
     DENOMINATOR_PT_MIN,
@@ -83,9 +78,9 @@ RATE_Y_RANGE = (1e-3, 2.0)
 
 
 @dataclass
-class EventEvaluation:
+class Performance:
     """
-    One event's evaluated sims and track candidates, as per-event arrays.
+    Sim tracks (sims) and track candidates, as per-event arrays.
 
     The sim_* fields hold the sims in the efficiency denominator without its pT cut (pt_min=0), so efficiency vs
     pT can show the turn-on; apply DENOMINATOR_PT_MIN for everything else. The trackcand_* fields hold every track
@@ -105,42 +100,47 @@ class EventEvaluation:
 
 def main() -> None:
     args = parse_args()
-    manifest_events = read_manifest(path=args.manifest)
-    events = events_in_set(events=manifest_events, event_set=args.event_set)
-    if args.n_events is not None:
-        events = events[: args.n_events]
-    all_evaluations = evaluate_events(
-        events=events,
+    lstntuple_files = read_file_list(path=args.file_list)
+    if args.n_files is not None:
+        lstntuple_files = lstntuple_files[: args.n_files]
+    all_performances = evaluate_events(
+        lstntuple_files=lstntuple_files,
         lstntuple_dir=args.lstntuple_dir,
         trackcand_source=args.trackcands,
         drop_duplicate_cleaned=args.drop_duplicate_cleaned,
         min_layers=args.min_layers,
     )
-    evaluation = concatenate_evaluations(all_evaluations=all_evaluations)
-    log_totals(evaluation=evaluation, n_events=len(all_evaluations))
+    perf = concatenate_performances(all_performances=all_performances)
+    log_totals(perf=perf, n_events=len(all_performances))
     os.makedirs(args.output, exist_ok=True)
-    plot_evaluation(
-        evaluation=evaluation,
-        path=os.path.join(args.output, f"evaluation_{args.trackcands}.pdf"),
-    )
+    pdf_path = os.path.join(args.output, f"performance_{args.trackcands}.pdf")
+    with PdfPages(pdf_path) as pdf:
+        print(f"[plot] pdf_path={pdf_path}")
+        plot_performance(
+            file_list=args.file_list,
+            perf=perf,
+            pdf=pdf,
+        )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate track candidates on one event set."
+        description="Evaluate track candidates' performance on one dataset."
     )
     parser.add_argument(
-        "--manifest", required=True, help="manifest.txt from md_processing.py"
+        "--file-list",
+        type=str,
+        required=True,
+        help="the dataset's LSTNtuple file list from md_processing.py, e.g. val.txt",
     )
     parser.add_argument(
         "--lstntuple-dir", required=True, help="directory of nominal-mode LSTNtuples"
     )
-    parser.add_argument("--event-set", required=True, choices=EVENT_SETS)
     parser.add_argument(
-        "--n-events",
+        "--n-files",
         type=int,
         default=None,
-        help="evaluate only the first N events of the set",
+        help="evaluate only the first N LSTNtuple files of the dataset",
     )
     parser.add_argument(
         "--trackcands",
@@ -162,48 +162,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         required=True,
-        help="directory for the plots, written as evaluation_<trackcands>.pdf",
+        help="directory for the plots, written as performance_<trackcands>.pdf",
     )
     return parser.parse_args()
 
 
 def evaluate_events(
-    events: list[ManifestEvent],
+    lstntuple_files: list[str],
     lstntuple_dir: str,
     trackcand_source: str,
     drop_duplicate_cleaned: bool,
     min_layers: int,
-) -> list[EventEvaluation]:
+) -> list[Performance]:
     """
-    Evaluate every event, opening each LSTNtuple once and reading its entries one at a time.
+    Evaluate every event of each LSTNtuple file, opening each file once and reading its entries one at a time.
 
     Logs one [event] line per event.
     """
-    all_evaluations = []
-    for lstntuple_file, entries in entries_by_lstntuple(events=events).items():
+    all_perfs = []
+    for lstntuple_file in lstntuple_files:
         with uproot.open(os.path.join(lstntuple_dir, lstntuple_file)) as root_file:
             tree = root_file["tree"]
-            for entry in entries:
+            for entry in range(tree.num_entries):
                 start = time.time()
                 event = read_event(
                     tree=tree,
                     entry=entry,
                     columns=COLUMNS,
                 )
-                evaluation = evaluate_event(
+                perf = evaluate_event(
                     event=event,
                     trackcand_source=trackcand_source,
                     drop_duplicate_cleaned=drop_duplicate_cleaned,
                     min_layers=min_layers,
                 )
-                all_evaluations.append(evaluation)
+                all_perfs.append(perf)
                 print(
                     f"[event] lstntuple_file={lstntuple_file} lstntuple_entry={entry}"
-                    f" n_denominator={len(evaluation.sim_pt)} n_found={np.sum(evaluation.sim_isFound)}"
-                    f" n_trackcands={len(evaluation.trackcand_pt)} n_fake={np.sum(evaluation.trackcand_isFake)}"
-                    f" n_duplicate={np.sum(evaluation.trackcand_isDuplicate)} seconds={time.time() - start:.1f}"
+                    f" n_denominator={len(perf.sim_pt)} n_found={np.sum(perf.sim_isFound)}"
+                    f" n_trackcands={len(perf.trackcand_pt)} n_fake={np.sum(perf.trackcand_isFake)}"
+                    f" n_duplicate={np.sum(perf.trackcand_isDuplicate)} seconds={time.time() - start:.1f}"
                 )
-    return all_evaluations
+    return all_perfs
 
 
 def read_event(
@@ -230,7 +230,7 @@ def evaluate_event(
     trackcand_source: str,
     drop_duplicate_cleaned: bool,
     min_layers: int,
-) -> EventEvaluation:
+) -> Performance:
     """
     One event: build its track candidates, match each to a sim, and flag found sims, fakes and duplicates.
     """
@@ -253,7 +253,7 @@ def evaluate_event(
     )
     # Without the pT cut, so efficiency vs pT shows the turn-on
     in_denominator = is_denominator(sims=sims, pt_min=0.0)
-    return EventEvaluation(
+    return Performance(
         sim_pt=sims["sim_pt"][in_denominator],
         sim_eta=sims["sim_eta"][in_denominator],
         sim_phi=sims["sim_phi"][in_denominator],
@@ -284,129 +284,134 @@ def match_trackcands(
     )
 
 
-def concatenate_evaluations(all_evaluations: list[EventEvaluation]) -> EventEvaluation:
-    """All events' evaluations in one EventEvaluation, each field concatenated over events."""
-    return EventEvaluation(
-        sim_pt=np.concatenate([evaluation.sim_pt for evaluation in all_evaluations]),
-        sim_eta=np.concatenate([evaluation.sim_eta for evaluation in all_evaluations]),
-        sim_phi=np.concatenate([evaluation.sim_phi for evaluation in all_evaluations]),
+def concatenate_performances(all_performances: list[Performance]) -> Performance:
+    """All events' performances in one Performance, each field concatenated over events."""
+    return Performance(
+        sim_pt=np.concatenate([perf.sim_pt for perf in all_performances]),
+        sim_eta=np.concatenate([perf.sim_eta for perf in all_performances]),
+        sim_phi=np.concatenate([perf.sim_phi for perf in all_performances]),
         sim_isFound=np.concatenate(
-            [evaluation.sim_isFound for evaluation in all_evaluations]
+            [perf.sim_isFound for perf in all_performances]
         ),
         trackcand_pt=np.concatenate(
-            [evaluation.trackcand_pt for evaluation in all_evaluations]
+            [perf.trackcand_pt for perf in all_performances]
         ),
         trackcand_eta=np.concatenate(
-            [evaluation.trackcand_eta for evaluation in all_evaluations]
+            [perf.trackcand_eta for perf in all_performances]
         ),
         trackcand_phi=np.concatenate(
-            [evaluation.trackcand_phi for evaluation in all_evaluations]
+            [perf.trackcand_phi for perf in all_performances]
         ),
         trackcand_isFake=np.concatenate(
-            [evaluation.trackcand_isFake for evaluation in all_evaluations]
+            [perf.trackcand_isFake for perf in all_performances]
         ),
         trackcand_isDuplicate=np.concatenate(
-            [evaluation.trackcand_isDuplicate for evaluation in all_evaluations]
+            [perf.trackcand_isDuplicate for perf in all_performances]
         ),
     )
 
 
 def log_totals(
-    evaluation: EventEvaluation,
+    perf: Performance,
     n_events: int,
 ) -> None:
     """One [total] line: counts and rates over all events, with the denominator's pT cut (DENOMINATOR_PT_MIN)."""
-    is_found = evaluation.sim_isFound[evaluation.sim_pt >= DENOMINATOR_PT_MIN]
+    is_found = perf.sim_isFound[perf.sim_pt >= DENOMINATOR_PT_MIN]
     efficiency, efficiency_unc = fraction_and_uncertainty(
         n_selected=np.sum(is_found),
         n_total=len(is_found),
     )
     fake_rate, fake_rate_unc = fraction_and_uncertainty(
-        n_selected=np.sum(evaluation.trackcand_isFake),
-        n_total=len(evaluation.trackcand_isFake),
+        n_selected=np.sum(perf.trackcand_isFake),
+        n_total=len(perf.trackcand_isFake),
     )
     duplicate_rate, duplicate_rate_unc = fraction_and_uncertainty(
-        n_selected=np.sum(evaluation.trackcand_isDuplicate),
-        n_total=len(evaluation.trackcand_isDuplicate),
+        n_selected=np.sum(perf.trackcand_isDuplicate),
+        n_total=len(perf.trackcand_isDuplicate),
     )
     print(
         f"[total] n_events={n_events} n_denominator={len(is_found)} n_found={np.sum(is_found)}"
         f" efficiency={efficiency:.4f} efficiency_unc={efficiency_unc:.4f}"
-        f" n_trackcands={len(evaluation.trackcand_isFake)} n_fake={np.sum(evaluation.trackcand_isFake)}"
+        f" n_trackcands={len(perf.trackcand_isFake)} n_fake={np.sum(perf.trackcand_isFake)}"
         f" fake_rate={fake_rate:.4f} fake_rate_unc={fake_rate_unc:.4f}"
-        f" n_duplicate={np.sum(evaluation.trackcand_isDuplicate)}"
+        f" n_duplicate={np.sum(perf.trackcand_isDuplicate)}"
         f" duplicate_rate={duplicate_rate:.4f} duplicate_rate_unc={duplicate_rate_unc:.4f}"
     )
 
 
-def plot_evaluation(
-    evaluation: EventEvaluation,
-    path: str,
+def plot_performance(
+    file_list: str,
+    perf: Performance,
+    pdf: PdfPages,
 ) -> None:
     """
     Efficiency vs sim pT (no pT cut), eta and phi; fake and duplicate rate vs track candidate pT, eta and phi.
 
-    All in one pdf at path, one plot per page.
+    All in one pdf, one plot per page.
     """
-    has_pt_cut = evaluation.sim_pt >= DENOMINATOR_PT_MIN
+    has_pt_cut = perf.sim_pt >= DENOMINATOR_PT_MIN
     pt_cut_label = rf"($p_\mathrm{{T}} \geq {DENOMINATOR_PT_MIN:g}$ GeV)"
-    with PdfPages(path) as pdf:
+    plot_fraction(
+        file_list=file_list,
+        values=perf.sim_pt,
+        is_selected=perf.sim_isFound,
+        bins=PT_BINS,
+        xlabel=r"Sim. $p_\mathrm{T}$ [GeV]",
+        ylabel="Efficiency",
+        y_range=EFFICIENCY_Y_RANGE,
+        pdf=pdf,
+        log_x=True,
+    )
+    for values, bins, xlabel in [
+        (perf.sim_eta, ETA_BINS, rf"Sim. $\eta$ {pt_cut_label}"),
+        (perf.sim_phi, PHI_BINS, rf"Sim. $\phi$ {pt_cut_label}"),
+    ]:
         plot_fraction(
-            values=evaluation.sim_pt,
-            is_selected=evaluation.sim_isFound,
-            bins=PT_BINS,
-            xlabel=r"Sim. $p_\mathrm{T}$ [GeV]",
+            file_list=file_list,
+            values=values[has_pt_cut],
+            is_selected=perf.sim_isFound[has_pt_cut],
+            bins=bins,
+            xlabel=xlabel,
             ylabel="Efficiency",
             y_range=EFFICIENCY_Y_RANGE,
             pdf=pdf,
+        )
+    for ylabel, is_flagged in [
+        ("Fake rate", perf.trackcand_isFake),
+        ("Duplicate rate", perf.trackcand_isDuplicate),
+    ]:
+        plot_fraction(
+            file_list=file_list,
+            values=perf.trackcand_pt,
+            is_selected=is_flagged,
+            bins=PT_BINS,
+            xlabel=r"Track candidate $p_\mathrm{T}$ [GeV]",
+            ylabel=ylabel,
+            y_range=RATE_Y_RANGE,
+            pdf=pdf,
             log_x=True,
+            log_y=True,
         )
         for values, bins, xlabel in [
-            (evaluation.sim_eta, ETA_BINS, rf"Sim. $\eta$ {pt_cut_label}"),
-            (evaluation.sim_phi, PHI_BINS, rf"Sim. $\phi$ {pt_cut_label}"),
+            (perf.trackcand_eta, ETA_BINS, r"Track candidate $\eta$"),
+            (perf.trackcand_phi, PHI_BINS, r"Track candidate $\phi$"),
         ]:
             plot_fraction(
-                values=values[has_pt_cut],
-                is_selected=evaluation.sim_isFound[has_pt_cut],
+                file_list=file_list,
+                values=values,
+                is_selected=is_flagged,
                 bins=bins,
                 xlabel=xlabel,
-                ylabel="Efficiency",
-                y_range=EFFICIENCY_Y_RANGE,
-                pdf=pdf,
-            )
-        for ylabel, is_flagged in [
-            ("Fake rate", evaluation.trackcand_isFake),
-            ("Duplicate rate", evaluation.trackcand_isDuplicate),
-        ]:
-            plot_fraction(
-                values=evaluation.trackcand_pt,
-                is_selected=is_flagged,
-                bins=PT_BINS,
-                xlabel=r"Track candidate $p_\mathrm{T}$ [GeV]",
                 ylabel=ylabel,
                 y_range=RATE_Y_RANGE,
                 pdf=pdf,
-                log_x=True,
                 log_y=True,
             )
-            for values, bins, xlabel in [
-                (evaluation.trackcand_eta, ETA_BINS, r"Track candidate $\eta$"),
-                (evaluation.trackcand_phi, PHI_BINS, r"Track candidate $\phi$"),
-            ]:
-                plot_fraction(
-                    values=values,
-                    is_selected=is_flagged,
-                    bins=bins,
-                    xlabel=xlabel,
-                    ylabel=ylabel,
-                    y_range=RATE_Y_RANGE,
-                    pdf=pdf,
-                    log_y=True,
-                )
-    print(f"[plot] path={path}")
+    print(f"[plot] pages={pdf.get_pagecount()}")
 
 
 def plot_fraction(
+    file_list: str,
     values: np.ndarray,
     is_selected: np.ndarray,
     bins: np.ndarray,
@@ -455,6 +460,7 @@ def plot_fraction(
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_ylim(y_range)
+    ax.text(0.05, 1.01, dataset_name(file_list), transform=ax.transAxes)
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -474,6 +480,17 @@ def fraction_and_uncertainty(
         fraction = n_selected / n_total
         uncertainty = np.sqrt(fraction * (1 - fraction) / n_total)
     return fraction, uncertainty
+
+
+def dataset_name(file_list: str) -> str:
+    bname = os.path.basename(file_list)
+    if bname == "train.txt":
+        return "Training"
+    if bname == "val.txt":
+        return "Validation"
+    if bname == "test.txt":
+        return "Test"
+    raise ValueError(f"Unknown dataset file: {file_list}")
 
 
 if __name__ == "__main__":
