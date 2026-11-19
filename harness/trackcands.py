@@ -1,6 +1,11 @@
 """
-One event's track candidates as per-event arrays, built from LST T5s, from MDs matched to sims (a ground-truth
-check of the harness), and later from a model's output.
+One event's track candidates. Fields are stored as per-event arrays.
+
+This file includes two methods for building track candidates from LSTNtuple:
+- LST T5s
+- MDs matched to the same sim track, as a ground-truth check
+
+MD-based ML models are responsible for building their own track candidates.
 """
 
 from dataclasses import dataclass

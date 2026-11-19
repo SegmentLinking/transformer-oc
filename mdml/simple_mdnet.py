@@ -487,6 +487,8 @@ def find_mdclusters(
     MDs' predicted kinematics, and NO_MDCLUSTER for noise and for MDs not kept.
     """
     md_mdclusterIdx = np.full(len(md_isKept), NO_MDCLUSTER)
+    if not np.any(md_isKept):
+        return md_mdclusterIdx
     # DBSCAN labels noise -1, which is NO_MDCLUSTER
     md_mdclusterIdx[md_isKept] = DBSCAN(
         eps=eps,

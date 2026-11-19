@@ -1,7 +1,6 @@
 # harness/CLAUDE.md
 
-Working rules for the evaluation harness. The design note, with what goes in and out, the pieces and the dated
-decisions, is `README.md`. Update its Decisions table whenever a decision is made or changed.
+Working rules for the evaluation harness. The design note, with what goes in and out, the pieces and the dated decisions, is `README.md`. Update its Decisions table whenever a decision is made or changed.
 
 @README.md
 

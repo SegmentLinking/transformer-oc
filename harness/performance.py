@@ -1,13 +1,9 @@
 """
-Evaluate track candidates' performance on one dataset: efficiency, fake rate and duplicate rate, as key=value logs and pdf
-plots. The track candidates are LST T5s, a ground-truth check of the harness from MDs matched to sims, or
+Evaluate track candidates' performance on one dataset: efficiency, fake rate and duplicate rate, as key=value logs and pdf plots. The track candidates are LST T5s, a ground-truth check of the harness from MDs matched to sims, or
 SimpleMDNet's (--trackcands).
 
 The dataset's LSTNtuple files come from its file list (val.txt from md_processing.py), and are read from a directory
-of nominal-mode LSTNtuples.
-Every event of each file is evaluated.
-SimpleMDNet reads each event's .pt file from md_processing.py, in the directory next to the file list with its
-name (val.txt -> val/).
+of nominal-mode LSTNtuples. Every event of each file is evaluated. SimpleMDNet reads each event's .pt file from md_processing.py, in the --pt-dir directory.
 
 From the repo root:
 apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.performance \
@@ -15,7 +11,7 @@ apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.performance 
     --pt-dir ../transformer-datasets/samples/ttbar/val \
     --lstntuple-dir ../transformer-datasets/samples/ttbar/nominal \
     --trackcands t5 \
-    --output output/evaluate/val
+    --output output
 
 For SimpleMDNet, --trackcands simple_mdnet --simple-mdnet output/mdml/run_<date>/simple_mdnet.pt.
 """
@@ -100,6 +96,7 @@ class Performance:
 
 def main() -> None:
     args = parse_args()
+    _ = dataset_name(args.file_list)
     lstntuple_files = read_file_list(path=args.file_list)
     if args.n_files is not None:
         lstntuple_files = lstntuple_files[: args.n_files]
