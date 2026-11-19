@@ -5,9 +5,7 @@ __pycache__/
 *.log
 *.tmp
 data/*
-!data/*.py
-!data/*.sh
-!data/*.sub
+!data/README.md
 output/
 nohup.out
 *.png
