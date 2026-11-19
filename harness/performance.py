@@ -47,6 +47,7 @@ TRACKCAND_SOURCES = ["t5", "mds_matched_to_sim", "simple_mdnet"]
 PT_BINS = np.geomspace(0.1, 50.0, 28)
 ETA_BINS = np.linspace(-2.4, 2.4, 25)
 PHI_BINS = np.linspace(-np.pi, np.pi, 25)
+FILE_LISTS_ALLOWED = ["train.txt", "val.txt", "test.txt"]
 
 rcParams.update(
     {
@@ -96,7 +97,8 @@ class Performance:
 
 def main() -> None:
     args = parse_args()
-    _ = dataset_name(args.file_list)
+    if os.path.basename(args.file_list) not in FILE_LISTS_ALLOWED:
+        raise ValueError(f"Unknown dataset file: {args.file_list}")
     lstntuple_files = read_file_list(path=args.file_list)
     if args.n_files is not None:
         lstntuple_files = lstntuple_files[: args.n_files]
