@@ -1,21 +1,32 @@
 # Transformer OC
 
-# 1) Data
+# 0) Environment
 
-Graph datasets (one graph per event) are made with [transformer-datasets](https://github.com/SegmentLinking/transformer-datasets), which documents the pipeline from simulation to graphs and the graph format. For example:
+Run everything inside the `ml-tracking` image, which has torch and other libraries. Building it yourself is optional: the Dockerfile is in `misc/nrp/train/`. You can download it locally with:
 
 ```
-python -m transformer_datasets.t3_processing --input LSTNtuple_*.root --output data/pu200_t3/ --seed 42 -n 16
+export APPTAINER_TMPDIR=${HOME}/apptainer/tmp
+export APPTAINER_CACHEDIR=${HOME}/apptainer/cache
+mkdir -p ${APPTAINER_TMPDIR} ${APPTAINER_CACHEDIR}
+apptainer build ml-tracking.sif docker://alexandertuna/ml-tracking:latest
 ```
 
-This writes `train/` and `val/` graph directories. Put them under `data/` and point `train_data_dir` and `val_data_dir` in the config at them.
+# 1) Data processing
+
+Run one of the preprocessing scripts to create graph datasets (one graph per event). For example:
+
+```
+python3 t3_processing.py --input ./CMSSW_15_1_0_pre2/src/RecoTracker/LSTCore/standalone/output_pu200_* --output pu200_t3/ -n 4
+```
+
+Each script will produce training and validation graph datasets (one file per event) in the script's configured output location.
 
 # 2) Training
 
 Train either locally or on the NRP cluster. Locally you can run the project's training entrypoint (see `src/main.py`). To run on NRP, use the deployment YAMLs under `misc/nrp/`.
 
 ```
-python3 src/main.py --config config_pu200.yaml
+python3 main.py --config config.yaml
 ```
 
 See config_pu200.yaml for example.
