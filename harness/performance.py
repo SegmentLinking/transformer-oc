@@ -1,18 +1,23 @@
 """
 Evaluate track candidates' performance on one dataset: efficiency, fake rate and duplicate rate, as key=value logs and pdf
-plots. The track candidates are LST T5s, or a ground-truth check of the harness from MDs matched to sims
-(--trackcands).
+plots. The track candidates are LST T5s, a ground-truth check of the harness from MDs matched to sims, or
+SimpleMDNet's (--trackcands).
 
 The dataset's LSTNtuple files come from its file list (val.txt from md_processing.py), and are read from a directory
 of nominal-mode LSTNtuples.
 Every event of each file is evaluated.
+SimpleMDNet reads each event's .pt file from md_processing.py, in the directory next to the file list with its
+name (val.txt -> val/).
 
 From the repo root:
-apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.evaluate \
+apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.performance \
     --file-list ../transformer-datasets/samples/ttbar/val.txt \
+    --pt-dir ../transformer-datasets/samples/ttbar/val \
     --lstntuple-dir ../transformer-datasets/samples/ttbar/nominal \
     --trackcands t5 \
     --output output/evaluate/val
+
+For SimpleMDNet, --trackcands simple_mdnet --simple-mdnet output/mdml/run_<date>/simple_mdnet.pt.
 """
 
 import argparse
@@ -40,14 +45,13 @@ from harness.trackcands import (
     trackcands_from_mds_matched_to_sim,
     trackcands_from_t5s,
 )
+from mdml.simple_mdnet import SimpleMDNet
 
-# Where the track candidates come from (--trackcands)
-TRACKCAND_SOURCES = ["t5", "mds_matched_to_sim"]
-# Log-spaced from 0.1 to 50 GeV (27 bins), for plots with a log pT axis
+TRACKCAND_SOURCES = ["t5", "mds_matched_to_sim", "simple_mdnet"]
 PT_BINS = np.geomspace(0.1, 50.0, 28)
 ETA_BINS = np.linspace(-2.4, 2.4, 25)
 PHI_BINS = np.linspace(-np.pi, np.pi, 25)
-# Plot style
+
 rcParams.update(
     {
         "font.size": 16,
@@ -69,7 +73,6 @@ rcParams.update(
         "figure.subplot.top": 0.95,
     }
 )
-# Fixed y ranges, so plots of different track candidates can be compared by eye; rates on a log axis
 EFFICIENCY_Y_RANGE = (0.0, 1.02)
 RATE_Y_RANGE = (1e-3, 2.0)
 
@@ -100,15 +103,22 @@ def main() -> None:
     lstntuple_files = read_file_list(path=args.file_list)
     if args.n_files is not None:
         lstntuple_files = lstntuple_files[: args.n_files]
-    all_performances = evaluate_events(
+    simple_mdnet = None
+    if args.trackcands == "simple_mdnet":
+        if not args.simple_mdnet or not os.path.exists(args.simple_mdnet):
+            raise FileNotFoundError(f"SimpleMDNet model not found at {args.simple_mdnet}")
+        simple_mdnet = SimpleMDNet.load(path=args.simple_mdnet, device="cpu")
+    all_perfs = evaluate_events(
         lstntuple_files=lstntuple_files,
         lstntuple_dir=args.lstntuple_dir,
+        pt_dir=args.pt_dir,
         trackcand_source=args.trackcands,
         drop_duplicate_cleaned=args.drop_duplicate_cleaned,
         min_layers=args.min_layers,
+        simple_mdnet=simple_mdnet,
     )
-    perf = concatenate_performances(all_performances=all_performances)
-    log_totals(perf=perf, n_events=len(all_performances))
+    perf = concatenate_performances(all_perfs=all_perfs)
+    log_totals(perf=perf, n_events=len(all_perfs))
     os.makedirs(args.output, exist_ok=True)
     pdf_path = os.path.join(args.output, f"performance_{args.trackcands}.pdf")
     with PdfPages(pdf_path) as pdf:
@@ -134,6 +144,9 @@ def parse_args() -> argparse.Namespace:
         "--lstntuple-dir", required=True, help="directory of nominal-mode LSTNtuples"
     )
     parser.add_argument(
+        "--pt-dir", required=True, help="directory of pt files which contain MD information per event"
+    )
+    parser.add_argument(
         "--n-files",
         type=int,
         default=None,
@@ -157,6 +170,11 @@ def parse_args() -> argparse.Namespace:
         help="mds_matched_to_sim only: keep sims whose MDs span at least this many layers",
     )
     parser.add_argument(
+        "--simple-mdnet",
+        default=None,
+        help="simple_mdnet only: a saved SimpleMDNet, e.g. output/mdml/run_<date>/simple_mdnet.pt",
+    )
+    parser.add_argument(
         "--output",
         required=True,
         help="directory for the plots, written as performance_<trackcands>.pdf",
@@ -167,14 +185,15 @@ def parse_args() -> argparse.Namespace:
 def evaluate_events(
     lstntuple_files: list[str],
     lstntuple_dir: str,
+    pt_dir: str,
     trackcand_source: str,
     drop_duplicate_cleaned: bool,
     min_layers: int,
+    simple_mdnet: SimpleMDNet | None,
 ) -> list[Performance]:
     """
-    Evaluate every event of each LSTNtuple file, opening each file once and reading its entries one at a time.
-
-    Logs one [event] line per event.
+    Evaluate every event of each LSTNtuple file, opening each file and reading entries one at a time.
+    pt_dir has one .pt file per event, which are used by MD models.
     """
     all_perfs = []
     for lstntuple_file in lstntuple_files:
@@ -182,6 +201,7 @@ def evaluate_events(
             tree = root_file["tree"]
             for entry in range(tree.num_entries):
                 start = time.time()
+                pt_path = os.path.join(pt_dir, f"{lstntuple_file}.entry_{entry}.pt")
                 event = read_event(
                     tree=tree,
                     entry=entry,
@@ -192,6 +212,8 @@ def evaluate_events(
                     trackcand_source=trackcand_source,
                     drop_duplicate_cleaned=drop_duplicate_cleaned,
                     min_layers=min_layers,
+                    simple_mdnet=simple_mdnet,
+                    pt_path=pt_path,
                 )
                 all_perfs.append(perf)
                 print(
@@ -210,16 +232,14 @@ def read_event(
 ) -> ak.Record:
     """
     One entry of an LSTNtuple tree as one event (an ak.Record).
-
-    tree.arrays returns an ak.Array with one element per entry in [entry_start, entry_stop); reading exactly one
-    entry and taking element [0] gives that event.
     """
+    only_event = 0
     events = tree.arrays(
         columns,
         entry_start=entry,
         entry_stop=entry + 1,
     )
-    return events[0]
+    return events[only_event]
 
 
 def evaluate_event(
@@ -227,34 +247,43 @@ def evaluate_event(
     trackcand_source: str,
     drop_duplicate_cleaned: bool,
     min_layers: int,
+    simple_mdnet: SimpleMDNet | None,
+    pt_path: str,
 ) -> Performance:
     """
-    One event: build its track candidates, each with its sim from its source, and flag found sims, fakes and
-    duplicates.
+    One event: build track candidates, each with its sim from its source, and flag found sims, fakes and
+    duplicates. pt_path is the event's .pt file, read by MD models only.
     """
     if trackcand_source == "t5":
         trackcands = trackcands_from_t5s(
             event=event,
             drop_duplicate_cleaned=drop_duplicate_cleaned,
         )
-    else:
+    elif trackcand_source == "mds_matched_to_sim":
         trackcands = trackcands_from_mds_matched_to_sim(
             event=event,
             min_layers=min_layers,
         )
+    else:
+        only_event = 0
+        trackcands = simple_mdnet.trackcands(paths=[pt_path])[only_event]
+
+    # Match track candidates to sim tracks
     trackcand_simIdx = trackcands.trackcand_simIdx
     sims = {column: ak.to_numpy(event[column]) for column in SIM_COLUMNS}
     n_trackcands_of_sim = n_trackcands_per_sim(
         trackcand_simIdx=trackcand_simIdx,
         n_sims=len(sims["sim_pt"]),
     )
+
     # Without the pT cut, so efficiency vs pT shows the turn-on
-    in_denominator = is_denominator(sims=sims, pt_min=0.0)
+    sim_denom = is_denominator(sims=sims, pt_min=0.0)
+
     return Performance(
-        sim_pt=sims["sim_pt"][in_denominator],
-        sim_eta=sims["sim_eta"][in_denominator],
-        sim_phi=sims["sim_phi"][in_denominator],
-        sim_isFound=(n_trackcands_of_sim > 0)[in_denominator],
+        sim_pt=sims["sim_pt"][sim_denom],
+        sim_eta=sims["sim_eta"][sim_denom],
+        sim_phi=sims["sim_phi"][sim_denom],
+        sim_isFound=(n_trackcands_of_sim > 0)[sim_denom],
         trackcand_pt=trackcands.trackcand_pt,
         trackcand_eta=trackcands.trackcand_eta,
         trackcand_phi=trackcands.trackcand_phi,
@@ -266,30 +295,18 @@ def evaluate_event(
     )
 
 
-def concatenate_performances(all_performances: list[Performance]) -> Performance:
-    """All events' performances in one Performance, each field concatenated over events."""
+def concatenate_performances(perfs: list[Performance]) -> Performance:
+    cat = np.concatenate
     return Performance(
-        sim_pt=np.concatenate([perf.sim_pt for perf in all_performances]),
-        sim_eta=np.concatenate([perf.sim_eta for perf in all_performances]),
-        sim_phi=np.concatenate([perf.sim_phi for perf in all_performances]),
-        sim_isFound=np.concatenate(
-            [perf.sim_isFound for perf in all_performances]
-        ),
-        trackcand_pt=np.concatenate(
-            [perf.trackcand_pt for perf in all_performances]
-        ),
-        trackcand_eta=np.concatenate(
-            [perf.trackcand_eta for perf in all_performances]
-        ),
-        trackcand_phi=np.concatenate(
-            [perf.trackcand_phi for perf in all_performances]
-        ),
-        trackcand_isFake=np.concatenate(
-            [perf.trackcand_isFake for perf in all_performances]
-        ),
-        trackcand_isDuplicate=np.concatenate(
-            [perf.trackcand_isDuplicate for perf in all_performances]
-        ),
+        sim_pt=cat([pf.sim_pt for pf in perfs]),
+        sim_eta=cat([pf.sim_eta for pf in perfs]),
+        sim_phi=cat([pf.sim_phi for pf in perfs]),
+        sim_isFound=cat([pf.sim_isFound for pf in perfs]),
+        trackcand_pt=cat([pf.trackcand_pt for pf in perfs]),
+        trackcand_eta=cat([pf.trackcand_eta for pf in perfs]),
+        trackcand_phi=cat([pf.trackcand_phi for pf in perfs]),
+        trackcand_isFake=cat([pf.trackcand_isFake for pf in perfs]),
+        trackcand_isDuplicate=cat([pf.trackcand_isDuplicate for pf in perfs]),
     )
 
 
