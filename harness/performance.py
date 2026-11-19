@@ -117,7 +117,7 @@ def main() -> None:
         min_layers=args.min_layers,
         simple_mdnet=simple_mdnet,
     )
-    perf = concatenate_performances(all_perfs=all_perfs)
+    perf = concatenate_performances(perfs=all_perfs)
     log_totals(perf=perf, n_events=len(all_perfs))
     os.makedirs(args.output, exist_ok=True)
     pdf_path = os.path.join(args.output, f"performance_{args.trackcands}.pdf")
