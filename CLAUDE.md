@@ -2,6 +2,20 @@
 
 ML track reconstruction for CMS Phase-2 (HL-LHC, PU200). A sparse transformer is trained with an **object condensation (OC)** loss to group LST (Line Segment Tracking) **T3** objects, one point cloud per event, into tracks. Upstream: [SegmentLinking/transformer-oc](https://github.com/SegmentLinking/transformer-oc), originally by Aashay Arora (see `notes/tuna.md` for links to the CHEP26 talk and DP note).
 
+## Conventions
+
+Here are miscellaneous conventions about how to write code for this project. The conventions should be followed within reason. When in doubt, please ask.
+
+- For scripts, include a minimal example of how to run in the docstring.
+- Avoid using bare "candidate". "track candidate" is an technical term in LST, and bare "candidate" causes confusion.
+- Use "track candidate" in prose, and `trackcand` or `tc` in code.
+- Use "sim track" in prose, not "sim", when referring to a sim track and the `sim_*` features. In code, `sim` is fine as a shorthand.
+- Use "performance" when referring to results of the tracking algorithms, like efficiency, fake rate, and duplicate rate. In code, shorthands like `perf` are fine. Don't use "evaluation", "assessment", etc.
+- Use LST prefixes for variable names when appropriate. For example, use `t3_pt` to describe the transverse momentum of a collection of T3s.
+- Arrays with the same prefix in their variable name (e.g. `t3_*`) must have same length when near group of arrays with similar names. For example, if arrays `t3_pt`, `t3_eta`, and `t3_simIdx` are all defined in the same scope, they must have the same length. Index `i` of each array should describe the same T3.
+- When a dict is really a fixed group of named fields (for example, a hit with `x`, `y`, `z`, `layer` fields), make it a small class, usually a `@dataclass`, so code reads `hit.layer` instead of `info["hit_layer"]`. Name the class for what it is, not `Record` or `Info`.
+-  Avoid single-character variable names that live beyond one line of code. For a short name, use two or three characters (`md`, `sim`). Within a single line, such as a comprehension, a single character is fine when the container says what it holds (`[t.eta() for t in tracks]`), but not `[x.func() for x in container]`. `_` is fine for a value that is really discarded. Library keyword arguments (matplotlib's `s=`) and math symbols in docstrings are exempt.
+
 ## Direction (planned changes)
 
 This repo is mid-redesign; the sections below describe the *current* state.
