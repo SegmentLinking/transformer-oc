@@ -30,7 +30,6 @@ import numpy as np
 import uproot
 
 from harness.constants import COLUMNS, SIM_COLUMNS
-from harness.events import read_file_list
 from harness.metrics import (
     DENOMINATOR_PT_MIN,
     is_denominator,
@@ -179,6 +178,12 @@ def parse_args() -> argparse.Namespace:
         help="directory for the plots, written as performance_<trackcands>.pdf",
     )
     return parser.parse_args()
+
+
+def read_file_list(path: str) -> list[str]:
+    """The LSTNtuple file names listed at path, in order."""
+    with open(path) as list_file:
+        return list_file.read().split()
 
 
 def evaluate_events(

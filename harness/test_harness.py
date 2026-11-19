@@ -11,7 +11,7 @@ import awkward as ak
 import numpy as np
 import pytest
 
-from harness.events import read_file_list
+from harness.performance import read_file_list
 from harness.metrics import (
     is_denominator,
     is_duplicate,
@@ -272,7 +272,7 @@ def test_trackcands_from_mds_matched_to_sim_min_layers():
     assert trackcands.trackcand_pt.tolist() == []
 
 
-# events.py
+# performance.py
 
 
 def test_read_file_list(tmp_path):
