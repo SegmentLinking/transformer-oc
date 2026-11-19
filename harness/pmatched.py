@@ -1,10 +1,9 @@
 """
-Match a track candidate to a sim track, following LST's matchedSimTrkIdxsAndFracs (trkCore.cc).
+Match a track candidate to a sim track, following LST's matchedSimTrkIdxsAndFracs (trkCore.cc). Generally, "fraction" is pMatched in LST.
 
-Each of the track candidate's unique hits counts once for every sim it belongs to (a hit with two sims counts for
-both). The track candidate matches its best sim if that sim has more than MATCH_FRACTION of the unique hits.
+Each of the track candidate's unique hits counts once for every sim track it belongs to. A hit with two sim tracks counts for both. The track candidate matches its best sim track if that sim track has more than MATCH_FRACTION of the unique hits.
 
-Like LST, hits with no sim compete as one more "sim": if they outnumber the best sim, the fraction is 0.
+Like LST, hits with no sim track compete as a null "sim track": if they outnumber the best sim track, the fraction is 0.
 """
 
 MATCH_FRACTION = 0.75
@@ -16,11 +15,11 @@ def best_sim(
     hit_sims: dict[int, list[int]],
 ) -> tuple[int, float]:
     """
-    The sim with the most of the track candidate's unique hits, and its fraction of them.
+    The sim track with the most of the track candidate's unique hits, and its fraction of them.
 
-    hit_sims maps an LST hit index to its sim indices. On a tie between sims, the smaller sim index wins.
+    hit_sims maps an LST hit index to its sim indices. On a tie, the smaller sim index wins.
 
-    Returns (UNMATCHED, 0.0) when hits with no sim outnumber the best sim, or tie with it and come first (LST
+    Returns (UNMATCHED, 0.0) when hits with no sim track outnumber the best sim, or tie with it and come first (LST
     breaks ties by first appearance in the hit list), which includes the case where no hit has a sim.
     """
     # Unique hits in their original order, which LST's tie rule needs
@@ -67,7 +66,7 @@ def matched_sim(
     hits: list[int],
     hit_sims: dict[int, list[int]],
 ) -> int:
-    """The track candidate's best sim if its fraction is above MATCH_FRACTION, else UNMATCHED."""
+    """The track candidate's best sim track if its fraction is above MATCH_FRACTION, else UNMATCHED."""
     sim, fraction = best_sim(hits=hits, hit_sims=hit_sims)
     if fraction > MATCH_FRACTION:
         return sim

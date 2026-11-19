@@ -17,14 +17,14 @@ from harness.metrics import (
     is_duplicate,
     n_trackcands_per_sim,
 )
-from harness.trackcand_matching import UNMATCHED, best_sim, matched_sim
+from harness.pmatched import UNMATCHED, best_sim, matched_sim
 from harness.trackcands import (
     NO_HIT,
     trackcands_from_mds_matched_to_sim,
     trackcands_from_t5s,
 )
 
-# trackcand_matching.py
+# pmatched.py
 
 
 # Hits 1-4: sim 5; hit 5: sims 5 and 7; hits 6-7: sim 7; hits 8-9: sim 8; hit 10: no sim (not in the map)

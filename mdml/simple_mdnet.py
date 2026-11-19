@@ -28,7 +28,7 @@ from sklearn.cluster import DBSCAN
 from sklearn.neighbors import NearestNeighbors
 from torch import nn
 
-from harness.trackcand_matching import matched_sim
+from harness.pmatched import matched_sim
 from harness.trackcands import NO_HIT, EventTrackCandidates
 from mdml.data import (
     MD_FEATURES,
