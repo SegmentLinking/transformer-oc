@@ -5,6 +5,22 @@ same code and come out as the same numbers, so "A is better than B" means the sa
 
 This file is the living design note: update it whenever a decision is made or changed.
 
+## Performance references
+
+The current performance measurements for T5s and MDs built from sim indices are:
+
+| Track candidates | Efficiency | Fake rate |
+|---|---|---|
+| All T5s | 0.7882 ± 0.0022 | 0.0188 |
+| T5s after cleaning | 0.7875 ± 0.0022 | 0.0079 |
+| MDs matched to sim tracks (≥1 layer) | 0.9191 ± 0.0015 | 0 |
+| MDs matched to sim tracks (≥2 layers) | 0.8983 ± 0.0016 | 0 |
+| MDs matched to sim tracks (≥3 layers) | 0.8823 ± 0.0017 | 0 |
+| MDs matched to sim tracks (≥4 layers) | 0.8660 ± 0.0018 | 0 |
+| MDs matched to sim tracks (≥5 layers) | 0.8429 ± 0.0020 | 0 |
+
+This provides important references for performance we can target with a MD-based ML approach. We should be able to reach 78 percent efficiency, and we probably cannot exceed 92 percent efficiency.
+
 ## What goes in
 
 - **Track candidates**, per event: each track candidate is a set of LST hit indices, its matched sim, a score, and reconstructed q/pT, η and φ. Each builder assigns the sim from its own source:
