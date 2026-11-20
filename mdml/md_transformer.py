@@ -9,7 +9,7 @@ whether it is fake and the kinematics of its sim, SIM_KINEMATICS = (q/pT, eta, c
   the predictions. phi is relative to the patch centre in the inputs and targets, so the network is phi-symmetric
   unless absolute_phi also gives it each MD's absolute phi.
 - Attention: an MD attends to another only if their |deta| and |dphi| are within the window of their layer pair:
-  a quantile of the |deta| and |dphi| of same-sim MD pairs in training events (layer_pair_windows).
+  a quantile of the |deta| and |dphi| of same-sim MD pairs in training events (LayerPairWindows.from_events).
 - Inference: a patch grid (patches with margin 0) covers the event, so each MD is in exactly one grid patch; each
   grid patch gets its margin and goes through the network.
 - Decoding: MDs with p(fake) >= fake_cut are dropped, DBSCAN (min_samples=MIN_MDS) clusters the rest in the
@@ -77,7 +77,7 @@ def main() -> None:
     train_paths = event_paths(pt_dir=config["train_dir"])[: config["n_train_events"]]
     # The last validation events: the harness evaluates the first validation file
     val_paths = event_paths(pt_dir=config["val_dir"])[-config["n_val_events"] :]
-    windows = layer_pair_windows(
+    windows = LayerPairWindows.from_events(
         paths=train_paths[: config["window_n_events"]],
         config=config,
     )
@@ -117,22 +117,25 @@ class LayerPairWindows:
     eta: torch.Tensor
     phi: torch.Tensor
 
-
-def layer_pair_windows(paths: list[str], config: dict) -> LayerPairWindows:
-    """
-    For each layer pair, quantile window_quantile of |deta| and |dphi| over the same-sim MD pairs (sim pT >=
-    pt_min) in paths, times window_scale. Pairs with fewer than MIN_WINDOW_PAIRS get width 0. Logs one [window]
-    line per layer pair.
-    """
-    raise NotImplementedError()
+    @classmethod
+    def from_events(cls, paths: list[str], config: dict) -> "LayerPairWindows":
+        """
+        For each layer pair, quantile window_quantile of |deta| and |dphi| over the same-sim MD pairs (sim pT >=
+        pt_min) in paths, times window_scale. Pairs with fewer than MIN_WINDOW_PAIRS get width 0. Logs one
+        [window] line per layer pair.
+        """
+        raise NotImplementedError()
 
 
 # ---------------------------------------------------------------- data
 
 
 @dataclass
-class EventInputs:
-    """One event's per-MD tensors that patches are cut from (n_md rows each)."""
+class MDInputs:
+    """
+    One event's MDs prepared for the network (n_md rows each): the per-MD inputs that patches are cut from, the
+    (eta, phi) that patches select on, and the training targets.
+    """
 
     # (n_md, N_LAYERS + len(FEATURE_SCALES)): layer one-hot, scaled features
     md_inputs: torch.Tensor
@@ -141,11 +144,48 @@ class EventInputs:
     md_layer: torch.Tensor  # layer - FIRST_LAYER
     md_simIdx: torch.Tensor
     md_simIsFake: torch.Tensor  # no sim, or sim pT < pt_min
-    md_simKinematics: torch.Tensor  # (n_md, 3): sim q/pT, eta, phi
+    # (n_md, 3): sim q/pT, eta, phi; nan where md_simIdx < 0
+    md_simKinematics: torch.Tensor
 
-
-def event_inputs(mds: MDsFromOneEvent, pt_min: float) -> EventInputs:
-    raise NotImplementedError()
+    @classmethod
+    def from_mds(cls, mds: MDsFromOneEvent, pt_min: float) -> "MDInputs":
+        """The MDs of mds, with layer one-hot encoded and features divided by FEATURE_SCALES."""
+        md_features = mds.md_features
+        md_simFeatures = mds.md_simFeatures
+        md_layer = md_features[:, MD_FEATURES.index("layer")].long() - FIRST_LAYER
+        md_scaled = [
+            md_features[:, MD_FEATURES.index(name)] / scale
+            for name, scale in FEATURE_SCALES.items()
+        ]
+        md_simPt = md_simFeatures[:, SIM_FEATURES.index("sim_pt")]
+        md_simKinematics = torch.stack(
+            [
+                md_simFeatures[:, SIM_FEATURES.index("sim_q")] / md_simPt,
+                md_simFeatures[:, SIM_FEATURES.index("sim_eta")],
+                md_simFeatures[:, SIM_FEATURES.index("sim_phi")],
+            ],
+            dim=1,
+        )
+        # The .pt files fill every sim feature with -999 when there is no sim; nan makes any use of them obvious
+        md_simKinematics[mds.md_simIdx < 0] = torch.nan
+        return cls(
+            md_inputs=torch.cat(
+                [
+                    nn.functional.one_hot(md_layer, N_LAYERS).float(),
+                    torch.stack(md_scaled, dim=1),
+                ],
+                dim=1,
+            ),
+            md_eta=md_features[:, MD_FEATURES.index("eta")],
+            md_phi=torch.atan2(
+                md_features[:, MD_FEATURES.index("sinphi")],
+                md_features[:, MD_FEATURES.index("cosphi")],
+            ),
+            md_layer=md_layer,
+            md_simIdx=mds.md_simIdx,
+            md_simIsFake=(mds.md_simIdx < 0) | (md_simPt < pt_min),
+            md_simKinematics=md_simKinematics,
+        )
 
 
 @dataclass
@@ -163,14 +203,62 @@ class Patch:
     md_simIdx: torch.Tensor
     md_simKinematics: torch.Tensor  # (n, 4): SIM_KINEMATICS, phi relative to the centre
 
+    @classmethod
+    def from_mdinputs(
+        cls,
+        mdi: MDInputs,
+        eta_centre: float,
+        phi_centre: float,
+        config: dict,
+    ) -> "Patch":
+        """
+        The MDs of mdi within half-widths (patch_eta + margin_eta, patch_phi + margin_phi) of the centre; those
+        outside (patch_eta, patch_phi) are the margin. Inputs: mdi.md_inputs, then (deta, dphi) to the centre
+        divided by the half-widths of patch + margin, then (if absolute_phi) each MD's absolute (cos phi, sin phi).
+        """
+        eta_half = config["patch_eta"] + config["margin_eta"]
+        phi_half = config["patch_phi"] + config["margin_phi"]
+        md_deta = mdi.md_eta - eta_centre
+        md_dphi = wrap_phi(mdi.md_phi - phi_centre)
+        md_idx = torch.nonzero(
+            (md_deta.abs() <= eta_half) & (md_dphi.abs() <= phi_half)
+        ).squeeze(1)
+        md_deta = md_deta[md_idx]
+        md_dphi = md_dphi[md_idx]
+        md_inputs = [
+            mdi.md_inputs[md_idx],
+            torch.stack([md_deta / eta_half, md_dphi / phi_half], dim=1),
+        ]
+        if config["absolute_phi"]:
+            md_phi = mdi.md_phi[md_idx]
+            md_inputs.append(torch.stack([torch.cos(md_phi), torch.sin(md_phi)], dim=1))
+        md_simKinematics = mdi.md_simKinematics[md_idx]
+        # Not wrapped: only its cos and sin are used
+        md_simDphi = md_simKinematics[:, 2] - phi_centre
+        return cls(
+            md_idx=md_idx,
+            md_inputs=torch.cat(md_inputs, dim=1),
+            md_layer=mdi.md_layer[md_idx],
+            md_pos=torch.stack([md_deta, md_dphi], dim=1),
+            md_isMargin=(md_deta.abs() > config["patch_eta"])
+            | (md_dphi.abs() > config["patch_phi"]),
+            md_simIsFake=mdi.md_simIsFake[md_idx],
+            md_simIdx=mdi.md_simIdx[md_idx],
+            md_simKinematics=torch.stack(
+                [
+                    md_simKinematics[:, 0],
+                    md_simKinematics[:, 1],
+                    torch.cos(md_simDphi),
+                    torch.sin(md_simDphi),
+                ],
+                dim=1,
+            ),
+        )
 
-def make_patch(
-    ev: EventInputs,
-    eta_centre: float,
-    phi_centre: float,
-    config: dict,
-) -> Patch:
-    raise NotImplementedError()
+
+def wrap_phi(dphi: torch.Tensor) -> torch.Tensor:
+    """dphi wrapped into [-pi, pi)."""
+    return torch.remainder(dphi + np.pi, 2 * np.pi) - np.pi
 
 
 @dataclass

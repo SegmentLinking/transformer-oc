@@ -30,7 +30,7 @@ dropout: 0.0
 # false: phi only relative to the patch centre (phi-symmetric network); true: also each MD's absolute phi
 absolute_phi: false
 
-# ---- attention windows per layer pair (layer_pair_windows)
+# ---- attention windows per layer pair (LayerPairWindows.from_events)
 # Quantile of |deta| and |dphi| of same-sim MD pairs; larger is looser
 window_quantile: 0.9
 # Multiplies every window; > 1 relaxes them (e.g. on a larger GPU)
