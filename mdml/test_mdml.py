@@ -188,7 +188,7 @@ def test_find_mdclusters():
     )
     md_isKept = np.array([True] * 7 + [False])
     md_mdclusterIdx = find_mdclusters(
-        md_predKinematics=md_predKinematics,
+        md_coordinates=md_predKinematics,
         md_isKept=md_isKept,
         eps=0.1,
     )

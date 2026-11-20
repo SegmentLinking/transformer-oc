@@ -2,7 +2,8 @@
 MDTransformerNet: a tracking algorithm from outer-tracker MDs to track candidates.
 
 A transformer (MDTransformerModule) sees the MDs of one (eta, phi) patch at a time and predicts, for each MD,
-whether it is fake and the kinematics of its sim, SIM_KINEMATICS = (q/pT, eta, cos phi, sin phi).
+whether it is fake and the kinematics of its sim, SIM_KINEMATICS = (q/pT, eta, cos phi, sin phi). Optionally
+(embed_dim > 0) it also predicts a learned embedding, trained with a contrastive loss to put MDs of one sim close.
 
 - Patches: a patch is the MDs within half-widths (patch_eta, patch_phi) of a centre. Around it, a margin of
   half-widths (margin_eta, margin_phi) adds context: margin MDs are seen by attention but are not in the loss or
@@ -12,8 +13,9 @@ whether it is fake and the kinematics of its sim, SIM_KINEMATICS = (q/pT, eta, c
   a quantile of the |deta| and |dphi| of same-sim MD pairs in training events (LayerPairWindows.from_events).
 - Inference: a patch grid (patches with margin 0) covers the event, so each MD is in exactly one grid patch; each
   grid patch gets its margin and goes through the network.
-- Decoding: MDs with p(fake) >= fake_cut are dropped, DBSCAN (min_samples=MIN_MDS) clusters the rest in the
-  predicted SIM_KINEMATICS with radius eps, and each cluster is a track candidate.
+- Decoding: MDs with p(fake) >= fake_cut are dropped, DBSCAN (min_samples=MIN_MDS) clusters the rest with radius
+  eps in cluster_space (the predicted SIM_KINEMATICS, or the embedding), and each cluster is a track candidate.
+  The embedding is only trained within a patch, so clustering it over the whole event is questionable.
 
 MDTransformerNet owns the network and the working point (fake_cut, eps). MDTransformerLightningModule trains the
 network. All settings, including the run's paths, are in the config yaml (see md_transformer.yaml).
@@ -273,13 +275,15 @@ class PatchBatch:
     md_isValid: torch.Tensor
     md_isMargin: torch.Tensor
     md_simIsFake: torch.Tensor
+    md_simIdx: torch.Tensor
     md_simKinematics: torch.Tensor
 
 
 def collate_patches(patches: list[Patch]) -> PatchBatch:
     """
-    Pad each field to the largest patch. Padding is 0 or False, except md_simKinematics: nan, like MDs with no
-    sim. md_inputs and md_pos must stay finite, since padded MDs still go through the network.
+    Pad each field to the largest patch. Padding is 0 or False, except md_simIdx: -1 (no sim) and
+    md_simKinematics: nan, like MDs with no sim. md_inputs and md_pos must stay finite, since padded MDs still go
+    through the network.
     """
 
     def pad(tensors: list[torch.Tensor], value: float) -> torch.Tensor:
@@ -295,6 +299,7 @@ def collate_patches(patches: list[Patch]) -> PatchBatch:
         ),
         md_isMargin=pad([pat.md_isMargin for pat in patches], value=False),
         md_simIsFake=pad([pat.md_simIsFake for pat in patches], value=False),
+        md_simIdx=pad([pat.md_simIdx for pat in patches], value=-1),
         md_simKinematics=pad(
             [pat.md_simKinematics for pat in patches],
             value=torch.nan,
@@ -334,8 +339,8 @@ class MDTransformerNet:
     """
     The whole algorithm: an MDTransformerModule plus the working point that turns its output into track
     candidates. fake_cut: MDs with p(fake) below it are clustered (chosen to keep fake_keep of the real MDs).
-    eps: DBSCAN radius in predicted SIM_KINEMATICS (quantile eps_quantile, see choose_eps). Both are None until
-    chosen or loaded.
+    eps: DBSCAN radius in cluster_space (quantile eps_quantile, see choose_eps). Both are None until chosen or
+    loaded.
     """
 
     def __init__(self, config: dict, windows: LayerPairWindows) -> None:
@@ -345,12 +350,15 @@ class MDTransformerNet:
         """Train the network with an MDTransformerLightningModule (make_trainer)."""
         raise NotImplementedError()
 
-    def predict(self, mds: MDsFromOneEvent) -> tuple[np.ndarray, np.ndarray]:
+    def predict(
+        self,
+        mds: MDsFromOneEvent,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        md_predProbFake (n_md,) and md_predKinematics (n_md, 4: q/pT, eta, cos phi, sin phi with absolute phi)
-        for every MD. The patch grid (patch_grid) covers the event; each grid patch gets its margin, and
-        patches_per_batch of them go through the network at a time. Each MD takes the prediction of the grid
-        patch that holds it.
+        md_predProbFake (n_md,), md_predKinematics (n_md, 4: q/pT, eta, cos phi, sin phi with absolute phi) and
+        md_predEmbedding (n_md, embed_dim) for every MD. The patch grid (patch_grid) covers the event; each grid
+        patch gets its margin, and patches_per_batch of them go through the network at a time. Each MD takes the
+        prediction of the grid patch that holds it.
         """
         raise NotImplementedError()
 
@@ -360,7 +368,7 @@ class MDTransformerNet:
 
     def choose_eps(self, paths: list[str]) -> None:
         """
-        Set self.eps to quantile eps_quantile, over the kept real MDs, of the predicted-kinematics distance to the
+        Set self.eps to quantile eps_quantile, over the kept real MDs, of the cluster_space distance to the
         (MIN_MDS - 1)-th nearest other kept real MD of the same sim. DBSCAN counts an MD among its own MIN_MDS,
         so at this eps that fraction of the kept real MDs could be core points from their own sim alone. Logs an
         [eps] line.
@@ -368,7 +376,10 @@ class MDTransformerNet:
         raise NotImplementedError()
 
     def trackcands(self, paths: list[str]) -> list[TrackCandidatesFromOneEvent]:
-        """The track candidates of each event in paths, in the same order (the harness calls this)."""
+        """
+        The track candidates of each event in paths, in the same order (the harness calls this). DBSCAN runs in
+        cluster_space; the track candidates' pT, eta and phi always come from the predicted kinematics.
+        """
         raise NotImplementedError()
 
     def save(self, path: str) -> None:
@@ -394,14 +405,19 @@ def patch_grid(config: dict) -> tuple[int, int]:
 class MDTransformerLightningModule(pl.LightningModule):
     """
     Trains an MDTransformerModule: BCE on the fake logit of MDs outside the margin, plus mse_weight times the MSE
-    of SIM_KINEMATICS on real MDs outside the margin. AdamW with a one-cycle learning rate. Logs [train] every
-    log_every steps and [val] per epoch; the hyperparameters (the config) go to hparams.yaml.
+    of SIM_KINEMATICS on real MDs outside the margin, plus (if embed_dim > 0) contrastive_weight times
+    contrastive_loss. AdamW with a one-cycle learning rate. Logs [train] every log_every steps and [val] per
+    epoch; the hyperparameters (the config) go to hparams.yaml.
     """
 
     def __init__(self, config: dict, module: "MDTransformerModule") -> None:
         raise NotImplementedError()
 
-    def losses(self, batch: PatchBatch) -> tuple[torch.Tensor, torch.Tensor]:
+    def losses(
+        self,
+        batch: PatchBatch,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(bce, mse, contrastive), each unweighted; contrastive is 0 if embed_dim is 0."""
         raise NotImplementedError()
 
     def training_step(self, batch: PatchBatch, batch_idx: int) -> torch.Tensor:
@@ -417,6 +433,19 @@ class MDTransformerLightningModule(pl.LightningModule):
         raise NotImplementedError()
 
 
+def contrastive_loss(
+    md_embedding: torch.Tensor,
+    batch: PatchBatch,
+    contrastive_margin: float,
+) -> torch.Tensor:
+    """
+    Per patch, anchors are the real MDs outside the margin, and every other valid MD (margin included) is a
+    positive (real, same sim) or a negative. Loss: mean d^2 over positives plus mean relu(contrastive_margin - d)^2
+    over negatives, with d the embedding distance, averaged over patches with at least one anchor.
+    """
+    raise NotImplementedError()
+
+
 def make_trainer(config: dict) -> pl.Trainer:
     """No progress bar (plain [train]/[val] lines), CSVLogger and checkpoints in the run directory."""
     raise NotImplementedError()
@@ -427,15 +456,23 @@ def make_trainer(config: dict) -> pl.Trainer:
 
 class MDTransformerModule(nn.Module):
     """
-    Per-MD MLP embedding, n_blocks pre-norm transformer encoder layers (nn.TransformerEncoderLayer) with the
-    layer-pair window mask, and a head -> (fake logit, SIM_KINEMATICS). The windows are buffers, so they are
-    saved with the state_dict.
+    A per-MD input MLP, n_blocks pre-norm transformer encoder layers (nn.TransformerEncoderLayer) with the
+    layer-pair window mask, and a head -> (fake logit, SIM_KINEMATICS, embedding). The head's hidden layer is
+    shared; only its last linear layer has separate rows per output. The windows are buffers, so they are saved
+    with the state_dict.
     """
 
     def __init__(self, config: dict, windows: LayerPairWindows) -> None:
         raise NotImplementedError()
 
-    def forward(self, batch: PatchBatch) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        batch: PatchBatch,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        md_predIsFakeLogit (n_patches, n_md_max), md_predKinematics (n_patches, n_md_max, 4) and
+        md_predEmbedding (n_patches, n_md_max, embed_dim), with phi relative to the patch centre.
+        """
         raise NotImplementedError()
 
     def attention_mask(self, batch: PatchBatch) -> torch.Tensor:

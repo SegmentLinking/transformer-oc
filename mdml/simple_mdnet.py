@@ -332,7 +332,7 @@ class SimpleMDNet:
             mds = read_event(path=path)
             md_predProbFake, md_predKinematics = self.predict(mds=mds)
             md_mdclusterIdx = find_mdclusters(
-                md_predKinematics=md_predKinematics,
+                md_coordinates=md_predKinematics,
                 md_isKept=md_predProbFake < self.fake_cut,
                 eps=self.eps,
             )

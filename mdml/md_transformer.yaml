@@ -29,6 +29,8 @@ n_heads: 4
 dropout: 0.0
 # false: phi only relative to the patch centre (phi-symmetric network); true: also each MD's absolute phi
 absolute_phi: false
+# Learned per-MD embedding for clustering, trained with a contrastive loss; 0: none
+embed_dim: 0
 
 # ---- attention windows per layer pair (LayerPairWindows.from_events)
 # Quantile of |deta| and |dphi| of same-sim MD pairs; larger is looser
@@ -43,6 +45,9 @@ epochs: 3
 lr: 0.001
 weight_decay: 0.01
 mse_weight: 1.0
+# Contrastive loss (if embed_dim > 0): pull same-sim MDs together, push others beyond contrastive_margin
+contrastive_weight: 1.0
+contrastive_margin: 1.0
 seed: 42
 device: cuda
 precision: 32
@@ -50,9 +55,11 @@ num_workers: 8
 log_every: 200
 
 # ---- inference and working point
+# What DBSCAN clusters: kinematics (predicted SIM_KINEMATICS) or embedding (needs embed_dim > 0)
+cluster_space: kinematics
 # Patches (from the patch grid, with their margin) per forward pass
 patches_per_batch: 4
 # fake_cut keeps this fraction of real MDs
 fake_keep: 0.8
-# eps: this quantile of each kept real MD's distance to its (MIN_MDS - 1)-th nearest same-sim neighbour
+# eps: this quantile of each kept real MD's distance in cluster_space to its (MIN_MDS - 1)-th nearest same-sim neighbour
 eps_quantile: 0.5
