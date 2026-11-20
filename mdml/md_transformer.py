@@ -438,8 +438,23 @@ class MDTransformerNet:
         self.eps = None
 
     def train(self, train_paths: list[str], val_paths: list[str]) -> None:
-        """Train the network with an MDTransformerLightningModule (make_trainer)."""
-        raise NotImplementedError()
+        """
+        Train the network with an MDTransformerLightningModule (make_trainer). self.module is trained in place
+        and keeps the weights of the last epoch.
+        """
+        make_trainer(config=self.config).fit(
+            MDTransformerLightningModule(config=self.config, module=self.module),
+            train_dataloaders=make_loader(
+                paths=train_paths,
+                config=self.config,
+                train=True,
+            ),
+            val_dataloaders=make_loader(
+                paths=val_paths,
+                config=self.config,
+                train=False,
+            ),
+        )
 
     def predict(
         self,
@@ -539,10 +554,9 @@ class MDTransformerNet:
         for path in paths:
             mds = read_event(path=path)
             md_predProbFake, md_predKinematics, md_predEmbedding = self.predict(mds=mds)
-            md_coordinates = (
-                md_predKinematics
-                if self.config["cluster_space"] == "kinematics"
-                else md_predEmbedding
+            md_coordinates = self.cluster_coordinates(
+                md_predKinematics=md_predKinematics,
+                md_predEmbedding=md_predEmbedding,
             )
             mdi = MDInputs.from_mds(mds=mds, pt_min=self.config["pt_min"])
             md_isKeptReal = (
@@ -577,15 +591,65 @@ class MDTransformerNet:
         The track candidates of each event in paths, in the same order (the harness calls this). DBSCAN runs in
         cluster_space; the track candidates' pT, eta and phi always come from the predicted kinematics.
         """
-        raise NotImplementedError()
+        event_trackcands = []
+        for path in paths:
+            mds = read_event(path=path)
+            md_predProbFake, md_predKinematics, md_predEmbedding = self.predict(mds=mds)
+            md_mdclusterIdx = find_mdclusters(
+                md_coordinates=self.cluster_coordinates(
+                    md_predKinematics=md_predKinematics,
+                    md_predEmbedding=md_predEmbedding,
+                ),
+                md_isKept=md_predProbFake < self.fake_cut,
+                eps=self.eps,
+            )
+            event_trackcands.append(
+                trackcands_from_mdclusters(
+                    mds=mds,
+                    md_mdclusterIdx=md_mdclusterIdx,
+                    md_predProbFake=md_predProbFake,
+                    md_predKinematics=md_predKinematics,
+                )
+            )
+        return event_trackcands
+
+    def cluster_coordinates(
+        self,
+        md_predKinematics: np.ndarray,
+        md_predEmbedding: np.ndarray,
+    ) -> np.ndarray:
+        """The per-MD coordinates DBSCAN clusters, chosen by cluster_space: kinematics or embedding."""
+        if self.config["cluster_space"] == "kinematics":
+            return md_predKinematics
+        return md_predEmbedding
 
     def save(self, path: str) -> None:
         """The config, the network's state_dict (windows included), fake_cut and eps, as one dict."""
-        raise NotImplementedError()
+        torch.save(
+            {
+                "config": self.config,
+                "state_dict": self.module.state_dict(),
+                "fake_cut": self.fake_cut,
+                "eps": self.eps,
+            },
+            path,
+        )
 
     @classmethod
     def load(cls, path: str, device: str = "cuda") -> "MDTransformerNet":
-        raise NotImplementedError()
+        """The algorithm saved at path, on device (which replaces the saved config's device)."""
+        saved = torch.load(path, map_location=device, weights_only=True)
+        config = dict(saved["config"], device=device)
+        # Placeholder windows: load_state_dict overwrites them with the saved ones
+        windows = LayerPairWindows(
+            eta=torch.zeros(N_LAYERS, N_LAYERS),
+            phi=torch.zeros(N_LAYERS, N_LAYERS),
+        )
+        algo = cls(config=config, windows=windows)
+        algo.module.load_state_dict(saved["state_dict"])
+        algo.fake_cut = saved["fake_cut"]
+        algo.eps = saved["eps"]
+        return algo
 
 
 def patch_grid(config: dict) -> tuple[int, int]:
@@ -989,7 +1053,37 @@ def log_md_quality(algo: MDTransformerNet, paths: list[str]) -> None:
     One [md_quality] line over every MD of paths: the fraction of fake MDs rejected when 90% of real MDs are kept,
     and the IQR of the q/pT, eta and phi residuals of real MDs.
     """
-    raise NotImplementedError()
+    probs, is_fake, kinematics, sim_kinematics = [], [], [], []
+    for path in paths:
+        mds = read_event(path=path)
+        md_predProbFake, md_predKinematics, _ = algo.predict(mds=mds)
+        mdi = MDInputs.from_mds(mds=mds, pt_min=algo.config["pt_min"])
+        probs.append(md_predProbFake)
+        is_fake.append(mdi.md_simIsFake.numpy())
+        kinematics.append(md_predKinematics)
+        sim_kinematics.append(mdi.md_simKinematics.numpy())
+    probs = np.concatenate(probs)
+    is_fake = np.concatenate(is_fake)
+    is_real = ~is_fake
+    # Real MDs only: (q/pT, eta, cos phi, sin phi) and the sim's (q/pT, eta, phi)
+    kinematics = np.concatenate(kinematics)[is_real]
+    sim_kinematics = np.concatenate(sim_kinematics)[is_real]
+    cut_keep90 = np.quantile(probs[is_real], 0.9)
+    phi = np.arctan2(kinematics[:, 3], kinematics[:, 2])
+    phi_residual = wrap_phi(torch.from_numpy(phi - sim_kinematics[:, 2])).numpy()
+    print(
+        f"[md_quality] n_events={len(paths)} n_md={len(probs)} frac_real={is_real.mean():.4f} "
+        f"frac_fake_rejected_at_real_keep_0.9={np.mean(probs[is_fake] >= cut_keep90):.4f} "
+        f"qoverpt_res_iqr={iqr(kinematics[:, 0] - sim_kinematics[:, 0]):.4f} "
+        f"eta_res_iqr={iqr(kinematics[:, 1] - sim_kinematics[:, 1]):.4f} "
+        f"phi_res_iqr={iqr(phi_residual):.4f}",
+        flush=True,
+    )
+
+
+def iqr(values: np.ndarray) -> float:
+    """Interquartile range: the 75th minus the 25th percentile."""
+    return float(np.quantile(values, 0.75) - np.quantile(values, 0.25))
 
 
 if __name__ == "__main__":
