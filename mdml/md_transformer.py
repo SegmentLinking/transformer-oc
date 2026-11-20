@@ -126,7 +126,60 @@ class LayerPairWindows:
         pt_min) in paths, times window_scale. Pairs with fewer than MIN_WINDOW_PAIRS get width 0. Logs one
         [window] line per layer pair.
         """
-        raise NotImplementedError()
+        # One row per same-sim MD pair: (lower layer, higher layer) and (|deta|, |dphi|)
+        pair_layers, pair_absDeltas = [], []
+        for path in paths:
+            mdi = MDInputs.from_mds(mds=read_event(path=path), pt_min=config["pt_min"])
+            md_isReal = ~mdi.md_simIsFake
+            for sim in mdi.md_simIdx[md_isReal].unique().tolist():
+                md_idx = torch.nonzero(md_isReal & (mdi.md_simIdx == sim)).squeeze(1)
+                first, second = torch.triu_indices(len(md_idx), len(md_idx), offset=1)
+                md_a, md_b = md_idx[first], md_idx[second]
+                layer_a, layer_b = mdi.md_layer[md_a], mdi.md_layer[md_b]
+                pair_layers.append(
+                    torch.stack(
+                        [
+                            torch.minimum(layer_a, layer_b),
+                            torch.maximum(layer_a, layer_b),
+                        ],
+                        dim=1,
+                    )
+                )
+                pair_absDeltas.append(
+                    torch.stack(
+                        [
+                            (mdi.md_eta[md_a] - mdi.md_eta[md_b]).abs(),
+                            wrap_phi(mdi.md_phi[md_a] - mdi.md_phi[md_b]).abs(),
+                        ],
+                        dim=1,
+                    )
+                )
+        pair_layers = torch.cat(pair_layers)
+        pair_absDeltas = torch.cat(pair_absDeltas)
+        print(
+            f"[windows] n_events={len(paths)} window_quantile={config['window_quantile']} "
+            f"window_scale={config['window_scale']}"
+        )
+        eta = torch.zeros(N_LAYERS, N_LAYERS)
+        phi = torch.zeros(N_LAYERS, N_LAYERS)
+        for low in range(N_LAYERS):
+            for high in range(low, N_LAYERS):
+                abs_deltas = pair_absDeltas[
+                    (pair_layers[:, 0] == low) & (pair_layers[:, 1] == high)
+                ]
+                if len(abs_deltas) >= MIN_WINDOW_PAIRS:
+                    eta_window, phi_window = config["window_scale"] * torch.quantile(
+                        abs_deltas,
+                        q=config["window_quantile"],
+                        dim=0,
+                    )
+                    eta[low, high] = eta[high, low] = eta_window
+                    phi[low, high] = phi[high, low] = phi_window
+                print(
+                    f"[window] layer_low={low + FIRST_LAYER} layer_high={high + FIRST_LAYER} "
+                    f"n_pairs={len(abs_deltas)} eta={eta[low, high]:.4f} phi={phi[low, high]:.4f}"
+                )
+        return cls(eta=eta, phi=phi)
 
 
 # ---------------------------------------------------------------- data
