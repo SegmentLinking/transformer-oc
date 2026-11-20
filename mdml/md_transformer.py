@@ -314,13 +314,33 @@ class PatchDataset(torch.utils.data.Dataset):
     """
 
     def __init__(self, paths: list[str], config: dict, train: bool) -> None:
-        raise NotImplementedError()
+        self.paths = paths
+        self.config = config
+        self.train = train
 
     def __len__(self) -> int:
-        raise NotImplementedError()
+        return len(self.paths)
 
     def __getitem__(self, item: int) -> list[Patch]:
-        raise NotImplementedError()
+        mdi = MDInputs.from_mds(
+            mds=read_event(path=self.paths[item]),
+            pt_min=self.config["pt_min"],
+        )
+        generator = None if self.train else torch.Generator().manual_seed(item)
+        md_centres = torch.randint(
+            len(mdi.md_eta),
+            (self.config["patches_per_event"],),
+            generator=generator,
+        )
+        return [
+            Patch.from_mdinputs(
+                mdi=mdi,
+                eta_centre=float(mdi.md_eta[md]),
+                phi_centre=float(mdi.md_phi[md]),
+                config=self.config,
+            )
+            for md in md_centres.tolist()
+        ]
 
 
 def make_loader(
@@ -328,8 +348,18 @@ def make_loader(
     config: dict,
     train: bool,
 ) -> torch.utils.data.DataLoader:
-    """One event per step (batch_size 1), its patches collated into one PatchBatch."""
-    raise NotImplementedError()
+    """
+    One event per step, its patches collated into one PatchBatch. batch_size=None turns off the DataLoader's own
+    batching, so collate_patches gets one item: one event's patches.
+    """
+    return torch.utils.data.DataLoader(
+        PatchDataset(paths=paths, config=config, train=train),
+        batch_size=None,
+        shuffle=train,
+        num_workers=config["num_workers"],
+        collate_fn=collate_patches,
+        persistent_workers=config["num_workers"] > 0,
+    )
 
 
 # ---------------------------------------------------------------- algorithm
