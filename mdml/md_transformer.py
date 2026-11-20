@@ -429,7 +429,12 @@ class MDTransformerNet:
     """
 
     def __init__(self, config: dict, windows: LayerPairWindows) -> None:
-        raise NotImplementedError()
+        self.config = config
+        self.module = MDTransformerModule(config=config, windows=windows).to(
+            config["device"]
+        )
+        self.fake_cut = None
+        self.eps = None
 
     def train(self, train_paths: list[str], val_paths: list[str]) -> None:
         """Train the network with an MDTransformerLightningModule (make_trainer)."""
@@ -445,7 +450,66 @@ class MDTransformerNet:
         patch gets its margin, and patches_per_batch of them go through the network at a time. Each MD takes the
         prediction of the grid patch that holds it.
         """
-        raise NotImplementedError()
+        self.module.eval()
+        device = next(self.module.parameters()).device
+        mdi = MDInputs.from_mds(mds=mds, pt_min=self.config["pt_min"])
+        n_eta, n_phi = patch_grid(config=self.config)
+        eta_width = 2 * MD_ETA_MAX / n_eta
+        phi_width = 2 * np.pi / n_phi
+        # The grid patch (row in eta, column in phi) that holds each MD
+        md_gridRow = torch.clamp(
+            torch.floor((mdi.md_eta + MD_ETA_MAX) / eta_width).long(),
+            0,
+            n_eta - 1,
+        )
+        md_gridCol = torch.floor((mdi.md_phi + np.pi) / phi_width).long() % n_phi
+        n_md = len(mdi.md_eta)
+        md_predProbFake = torch.full((n_md,), torch.nan)
+        md_predKinematics = torch.full((n_md, len(SIM_KINEMATICS)), torch.nan)
+        md_predEmbedding = torch.full((n_md, self.config["embed_dim"]), torch.nan)
+        grid = [(row, col) for row in range(n_eta) for col in range(n_phi)]
+        for start in range(0, len(grid), self.config["patches_per_batch"]):
+            cells = grid[start : start + self.config["patches_per_batch"]]
+            phi_centres = [-np.pi + (col + 0.5) * phi_width for _, col in cells]
+            patches = [
+                Patch.from_mdinputs(
+                    mdi=mdi,
+                    eta_centre=-MD_ETA_MAX + (row + 0.5) * eta_width,
+                    phi_centre=phi_centre,
+                    config=self.config,
+                )
+                for (row, _), phi_centre in zip(cells, phi_centres)
+            ]
+            batch = collate_patches(patches=patches)
+            batch = PatchBatch(
+                **{name: val.to(device) for name, val in vars(batch).items()}
+            )
+            with torch.no_grad():
+                logits, kinematics, embeddings = self.module(batch=batch)
+            for idx, ((row, col), phi_centre, pat) in enumerate(
+                zip(cells, phi_centres, patches)
+            ):
+                n_pat = len(pat.md_idx)
+                is_in_cell = (md_gridRow[pat.md_idx] == row) & (
+                    md_gridCol[pat.md_idx] == col
+                )
+                md_idx = pat.md_idx[is_in_cell]
+                md_predProbFake[md_idx] = torch.sigmoid(
+                    logits[idx, :n_pat][is_in_cell]
+                ).cpu()
+                relative = kinematics[idx, :n_pat][is_in_cell].cpu()
+                # Back from phi relative to the patch centre to absolute phi
+                phi = torch.atan2(relative[:, 3], relative[:, 2]) + phi_centre
+                md_predKinematics[md_idx] = torch.stack(
+                    [relative[:, 0], relative[:, 1], torch.cos(phi), torch.sin(phi)],
+                    dim=1,
+                )
+                md_predEmbedding[md_idx] = embeddings[idx, :n_pat][is_in_cell].cpu()
+        return (
+            md_predProbFake.numpy(),
+            md_predKinematics.numpy(),
+            md_predEmbedding.numpy(),
+        )
 
     def choose_fake_cut(self, paths: list[str]) -> None:
         """Set self.fake_cut to quantile fake_keep of the real MDs' p(fake). Logs a [fake_cut] line."""
@@ -481,7 +545,9 @@ def patch_grid(config: dict) -> tuple[int, int]:
     Number of grid patches in eta (over |eta| <= MD_ETA_MAX) and phi: patches with margin 0 that cover the event
     without overlap, no wider than (patch_eta, patch_phi).
     """
-    raise NotImplementedError()
+    n_eta = int(np.ceil(MD_ETA_MAX / config["patch_eta"]))
+    n_phi = int(np.ceil(np.pi / config["patch_phi"]))
+    return n_eta, n_phi
 
 
 # ---------------------------------------------------------------- training
@@ -646,7 +712,10 @@ def contrastive_loss(
 
 
 def make_trainer(config: dict) -> pl.Trainer:
-    """No progress bar (plain [train]/[val] lines), CSVLogger and checkpoints in the run directory."""
+    """
+    Lightning's progress bar off (it redraws lines with carriage returns): PrintProgress prints plain lines
+    instead. CSVLogger and checkpoints in the run directory.
+    """
     return pl.Trainer(
         max_epochs=config["epochs"],
         accelerator="gpu" if config["device"] == "cuda" else "cpu",
@@ -664,10 +733,82 @@ def make_trainer(config: dict) -> pl.Trainer:
                 dirpath=config["output"],
                 monitor="val_loss",
                 save_last=True,
-            )
+            ),
+            PrintProgress(),
         ],
         num_sanity_val_steps=0,
     )
+
+
+class PrintProgress(pl.Callback):
+    """
+    A progress bar without carriage returns: one [progress] line per training and validation batch (one event),
+    with how far the epoch is and an estimate of the seconds left in it.
+    """
+
+    def on_train_epoch_start(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule
+    ) -> None:
+        self.start = time.time()
+
+    def on_train_batch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        outputs: dict,
+        batch: PatchBatch,
+        batch_idx: int,
+    ) -> None:
+        self.print_line(
+            stage="train",
+            epoch=trainer.current_epoch,
+            batch_idx=batch_idx,
+            n_batches=trainer.num_training_batches,
+            loss=outputs["loss"].item(),
+        )
+
+    def on_validation_epoch_start(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+    ) -> None:
+        self.start = time.time()
+
+    def on_validation_batch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        outputs: None,
+        batch: PatchBatch,
+        batch_idx: int,
+        dataloader_idx: int = 0,
+    ) -> None:
+        self.print_line(
+            stage="val",
+            epoch=trainer.current_epoch,
+            batch_idx=batch_idx,
+            n_batches=trainer.num_val_batches[dataloader_idx],
+            loss=None,
+        )
+
+    def print_line(
+        self,
+        stage: str,
+        epoch: int,
+        batch_idx: int,
+        n_batches: int,
+        loss: float | None,
+    ) -> None:
+        n_done = batch_idx + 1
+        seconds = time.time() - self.start
+        seconds_left = seconds / n_done * (n_batches - n_done)
+        loss_text = "" if loss is None else f" loss={loss:.4f}"
+        print(
+            f"[progress] stage={stage} epoch={epoch} batch={n_done} n_batches={n_batches} "
+            f"percent={100 * n_done / n_batches:.1f} seconds={seconds:.0f} "
+            f"seconds_left={seconds_left:.0f}{loss_text}",
+            flush=True,
+        )
 
 
 # ---------------------------------------------------------------- network
