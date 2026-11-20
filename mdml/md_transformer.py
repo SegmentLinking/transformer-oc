@@ -24,9 +24,9 @@ From the repo root, train, choose the working point and log the per-MD quality i
 (on phi3, data/ is bound to /data as on NRP):
 apptainer exec --nv -B data:/data ml-tracking.sif python3 -m mdml.md_transformer --config mdml/md_transformer.yaml
 
-The run directory is output_dir/<UTC time as YYYY_MM_DD_hhmmss>, and must be new. It gets train.log (the
-[progress] lines), hparams.yaml (the config, with run_dir) and metrics.csv (Lightning's CSVLogger), Lightning
-checkpoints, and md_transformer.pt (the whole algorithm, see MDTransformerNet.save).
+The run directory is output_dir/<UTC time as YYYY_MM_DD_hhmmss>, and must be new. It gets train.log (every
+line printed here, see print_and_log), hparams.yaml (the config, with run_dir) and metrics.csv (Lightning's
+CSVLogger), Lightning checkpoints, and md_transformer.pt (the whole algorithm, see MDTransformerNet.save).
 """
 
 import argparse
@@ -84,7 +84,10 @@ def main() -> None:
     config["run_dir"] = os.path.join(config["output_dir"], run_name)
     # exist_ok=False: a second run started in the same second fails instead of mixing into this one
     os.makedirs(config["run_dir"], exist_ok=False)
-    print(f"[run] run_dir={config['run_dir']}")
+    print_and_log(
+        line=f"[run] run_dir={config['run_dir']}",
+        config=config,
+    )
     torch.set_num_threads(config["cpu_threads"])
     pl.seed_everything(config["seed"])
     train_paths = event_paths(pt_dir=config["train_dir"])[: config["n_train_events"]]
@@ -118,6 +121,13 @@ def parse_args() -> dict:
         return yaml.safe_load(cfg)
 
 
+def print_and_log(line: str, config: dict) -> None:
+    """Print line, and append it to train.log in the run directory, so train.log has every line this script prints."""
+    print(line, flush=True)
+    with open(os.path.join(config["run_dir"], "train.log"), "a") as log_file:
+        log_file.write(line + "\n")
+
+
 # ---------------------------------------------------------------- attention windows
 
 
@@ -141,9 +151,9 @@ class LayerPairWindows:
         pair_layers, pair_absDeltas = [], []
         start = time.time()
         for idx, path in enumerate(paths):
-            print(
-                f"[windows] event={idx + 1} n_events={len(paths)} seconds={time.time() - start:.0f}",
-                flush=True,
+            print_and_log(
+                line=f"[windows] event={idx + 1} n_events={len(paths)} seconds={time.time() - start:.0f}",
+                config=config,
             )
             mdi = MDInputs.from_mds(mds=read_event(path=path), pt_min=config["pt_min"])
             md_isReal = ~mdi.md_simIsFake
@@ -172,9 +182,12 @@ class LayerPairWindows:
                 )
         pair_layers = torch.cat(pair_layers)
         pair_absDeltas = torch.cat(pair_absDeltas)
-        print(
-            f"[windows] n_events={len(paths)} window_quantile={config['window_quantile']} "
-            f"window_scale={config['window_scale']}"
+        print_and_log(
+            line=(
+                f"[windows] n_events={len(paths)} window_quantile={config['window_quantile']} "
+                f"window_scale={config['window_scale']}"
+            ),
+            config=config,
         )
         eta = torch.zeros(N_LAYERS, N_LAYERS)
         phi = torch.zeros(N_LAYERS, N_LAYERS)
@@ -191,9 +204,12 @@ class LayerPairWindows:
                     )
                     eta[low, high] = eta[high, low] = eta_window
                     phi[low, high] = phi[high, low] = phi_window
-                print(
-                    f"[window] layer_low={low + FIRST_LAYER} layer_high={high + FIRST_LAYER} "
-                    f"n_pairs={len(abs_deltas)} eta={eta[low, high]:.4f} phi={phi[low, high]:.4f}"
+                print_and_log(
+                    line=(
+                        f"[window] layer_low={low + FIRST_LAYER} layer_high={high + FIRST_LAYER} "
+                        f"n_pairs={len(abs_deltas)} eta={eta[low, high]:.4f} phi={phi[low, high]:.4f}"
+                    ),
+                    config=config,
                 )
         return cls(eta=eta, phi=phi)
 
@@ -546,9 +562,9 @@ class MDTransformerNet:
         real_probs = []
         start = time.time()
         for idx, path in enumerate(paths):
-            print(
-                f"[fake_cut] event={idx + 1} n_events={len(paths)} seconds={time.time() - start:.0f}",
-                flush=True,
+            print_and_log(
+                line=f"[fake_cut] event={idx + 1} n_events={len(paths)} seconds={time.time() - start:.0f}",
+                config=self.config,
             )
             mds = read_event(path=path)
             md_predProbFake, _, _ = self.predict(mds=mds)
@@ -556,10 +572,12 @@ class MDTransformerNet:
             real_probs.append(md_predProbFake[~mdi.md_simIsFake.numpy()])
         real_probs = np.concatenate(real_probs)
         self.fake_cut = float(np.quantile(real_probs, self.config["fake_keep"]))
-        print(
-            f"[fake_cut] fake_cut={self.fake_cut:.4f} fake_keep={self.config['fake_keep']} "
-            f"n_events={len(paths)} n_real_mds={len(real_probs)}",
-            flush=True,
+        print_and_log(
+            line=(
+                f"[fake_cut] fake_cut={self.fake_cut:.4f} fake_keep={self.config['fake_keep']} "
+                f"n_events={len(paths)} n_real_mds={len(real_probs)}"
+            ),
+            config=self.config,
         )
 
     def choose_eps(self, paths: list[str]) -> None:
@@ -572,9 +590,9 @@ class MDTransformerNet:
         distances = []
         start = time.time()
         for idx, path in enumerate(paths):
-            print(
-                f"[eps] event={idx + 1} n_events={len(paths)} seconds={time.time() - start:.0f}",
-                flush=True,
+            print_and_log(
+                line=f"[eps] event={idx + 1} n_events={len(paths)} seconds={time.time() - start:.0f}",
+                config=self.config,
             )
             mds = read_event(path=path)
             md_predProbFake, md_predKinematics, md_predEmbedding = self.predict(mds=mds)
@@ -603,11 +621,13 @@ class MDTransformerNet:
                 distances.extend(dist[:, MIN_MDS - 1])
         self.eps = float(np.quantile(distances, self.config["eps_quantile"]))
         n_too_few = int(np.isinf(distances).sum())
-        print(
-            f"[eps] eps={self.eps:.4f} eps_quantile={self.config['eps_quantile']} "
-            f"cluster_space={self.config['cluster_space']} n_events={len(paths)} "
-            f"n_kept_real_mds={len(distances)} n_in_sims_with_too_few={n_too_few}",
-            flush=True,
+        print_and_log(
+            line=(
+                f"[eps] eps={self.eps:.4f} eps_quantile={self.config['eps_quantile']} "
+                f"cluster_space={self.config['cluster_space']} n_events={len(paths)} "
+                f"n_kept_real_mds={len(distances)} n_in_sims_with_too_few={n_too_few}"
+            ),
+            config=self.config,
         )
 
     def trackcands(self, paths: list[str]) -> list[TrackCandidatesFromOneEvent]:
@@ -757,13 +777,15 @@ class MDTransformerLightningModule(pl.LightningModule):
                 if torch.cuda.is_available()
                 else 0.0
             )
-            print(
-                f"[train] epoch={self.current_epoch} step={batch_idx} loss={loss.item():.4f} "
-                f"loss_bce={bce.item():.4f} loss_mse={mse.item():.4f} "
-                f"loss_contrastive={contrastive.item():.4f} n_patches={batch.md_inputs.shape[0]} "
-                f"n_md_max={batch.md_inputs.shape[1]} gpu_mem_peak_gb={gpu_mem:.2f} "
-                f"seconds={time.time() - self.start:.0f}",
-                flush=True,
+            print_and_log(
+                line=(
+                    f"[train] epoch={self.current_epoch} step={batch_idx} loss={loss.item():.4f} "
+                    f"loss_bce={bce.item():.4f} loss_mse={mse.item():.4f} "
+                    f"loss_contrastive={contrastive.item():.4f} n_patches={batch.md_inputs.shape[0]} "
+                    f"n_md_max={batch.md_inputs.shape[1]} gpu_mem_peak_gb={gpu_mem:.2f} "
+                    f"seconds={time.time() - self.start:.0f}"
+                ),
+                config=self.config,
             )
         return loss
 
@@ -777,11 +799,13 @@ class MDTransformerLightningModule(pl.LightningModule):
         loss = self.total_loss(bce=bce, mse=mse, contrastive=contrastive)
         # val_loss picks the best checkpoint (make_trainer)
         self.log("val_loss", loss)
-        print(
-            f"[val] epoch={self.current_epoch} n_events={n_events} loss={loss.item():.4f} "
-            f"loss_bce={bce.item():.4f} loss_mse={mse.item():.4f} "
-            f"loss_contrastive={contrastive.item():.4f} seconds={time.time() - self.start:.0f}",
-            flush=True,
+        print_and_log(
+            line=(
+                f"[val] epoch={self.current_epoch} n_events={n_events} loss={loss.item():.4f} "
+                f"loss_bce={bce.item():.4f} loss_mse={mse.item():.4f} "
+                f"loss_contrastive={contrastive.item():.4f} seconds={time.time() - self.start:.0f}"
+            ),
+            config=self.config,
         )
 
     def configure_optimizers(self) -> dict:
@@ -875,7 +899,7 @@ def make_trainer(config: dict) -> pl.Trainer:
                 monitor="val_loss",
                 save_last=True,
             ),
-            PrintProgress(),
+            PrintProgress(config=config),
         ],
         num_sanity_val_steps=0,
     )
@@ -884,29 +908,11 @@ def make_trainer(config: dict) -> pl.Trainer:
 class PrintProgress(pl.Callback):
     """
     A progress bar without carriage returns: one [progress] line per training and validation batch (one event),
-    with how far the epoch is and an estimate of the seconds left in it. Each line is also appended to train.log in
-    the run directory, as in src/main.py's PrintProgress.
+    with how far the epoch is and an estimate of the seconds left in it (also in train.log, see print_and_log).
     """
 
-    def __init__(self) -> None:
-        self.log_file = None
-
-    def on_fit_start(
-        self,
-        trainer: pl.Trainer,
-        pl_module: pl.LightningModule,
-    ) -> None:
-        self.log_file = open(os.path.join(trainer.log_dir, "train.log"), "a")
-
-    def teardown(
-        self,
-        trainer: pl.Trainer,
-        pl_module: pl.LightningModule,
-        stage: str,
-    ) -> None:
-        if self.log_file is not None:
-            self.log_file.close()
-            self.log_file = None
+    def __init__(self, config: dict) -> None:
+        self.config = config
 
     def on_train_epoch_start(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
@@ -970,9 +976,7 @@ class PrintProgress(pl.Callback):
             f"percent={100 * n_done / n_batches:.1f} seconds={seconds:.0f} "
             f"seconds_left={seconds_left:.0f}{loss_text}"
         )
-        print(line, flush=True)
-        self.log_file.write(line + "\n")
-        self.log_file.flush()
+        print_and_log(line=line, config=self.config)
 
 
 # ---------------------------------------------------------------- network
@@ -1108,9 +1112,9 @@ def log_md_quality(algo: MDTransformerNet, paths: list[str]) -> None:
     probs, is_fake, kinematics, sim_kinematics = [], [], [], []
     start = time.time()
     for idx, path in enumerate(paths):
-        print(
-            f"[md_quality] event={idx + 1} n_events={len(paths)} seconds={time.time() - start:.0f}",
-            flush=True,
+        print_and_log(
+            line=f"[md_quality] event={idx + 1} n_events={len(paths)} seconds={time.time() - start:.0f}",
+            config=algo.config,
         )
         mds = read_event(path=path)
         md_predProbFake, md_predKinematics, _ = algo.predict(mds=mds)
@@ -1128,13 +1132,15 @@ def log_md_quality(algo: MDTransformerNet, paths: list[str]) -> None:
     cut_keep90 = np.quantile(probs[is_real], 0.9)
     phi = np.arctan2(kinematics[:, 3], kinematics[:, 2])
     phi_residual = wrap_phi(torch.from_numpy(phi - sim_kinematics[:, 2])).numpy()
-    print(
-        f"[md_quality] n_events={len(paths)} n_md={len(probs)} frac_real={is_real.mean():.4f} "
-        f"frac_fake_rejected_at_real_keep_0.9={np.mean(probs[is_fake] >= cut_keep90):.4f} "
-        f"qoverpt_res_iqr={iqr(kinematics[:, 0] - sim_kinematics[:, 0]):.4f} "
-        f"eta_res_iqr={iqr(kinematics[:, 1] - sim_kinematics[:, 1]):.4f} "
-        f"phi_res_iqr={iqr(phi_residual):.4f}",
-        flush=True,
+    print_and_log(
+        line=(
+            f"[md_quality] n_events={len(paths)} n_md={len(probs)} frac_real={is_real.mean():.4f} "
+            f"frac_fake_rejected_at_real_keep_0.9={np.mean(probs[is_fake] >= cut_keep90):.4f} "
+            f"qoverpt_res_iqr={iqr(kinematics[:, 0] - sim_kinematics[:, 0]):.4f} "
+            f"eta_res_iqr={iqr(kinematics[:, 1] - sim_kinematics[:, 1]):.4f} "
+            f"phi_res_iqr={iqr(phi_residual):.4f}"
+        ),
+        config=algo.config,
     )
 
 
