@@ -1,10 +1,10 @@
 # MDTransformerNet config (mdml/md_transformer.py). Defaults are the best scratch run so far.
-# Copy this file per run and change at least "output", which must be a new directory.
+# The same paths work on phi3 (with data/ bound to /data) and on NRP (the PVC at /data).
 
 # ---- run paths
-train_dir: ../transformer-datasets/samples/ttbar/train
-val_dir: ../transformer-datasets/samples/ttbar/val
-output: output/mdml/md_transformer/run_YYYY_MM_DD_HHMMSS
+train_dir: /data/mdml/train
+val_dir: /data/mdml/val
+output_dir: /data/output/mdml/md_transformer
 
 # ---- events
 n_train_events: 3000

@@ -20,11 +20,13 @@ whether it is fake and the kinematics of its sim, SIM_KINEMATICS = (q/pT, eta, c
 MDTransformerNet owns the network and the working point (fake_cut, eps). MDTransformerLightningModule trains the
 network. All settings, including the run's paths, are in the config yaml (see md_transformer.yaml).
 
-From the repo root, train, choose the working point and log the per-MD quality into one new run directory:
-apptainer exec --nv ml-tracking.sif python3 -m mdml.md_transformer --config mdml/md_transformer.yaml
+From the repo root, train, choose the working point and log the per-MD quality into one new run directory
+(on phi3, data/ is bound to /data as on NRP):
+apptainer exec --nv -B data:/data ml-tracking.sif python3 -m mdml.md_transformer --config mdml/md_transformer.yaml
 
-The run directory (config "output") must be new. It gets hparams.yaml and metrics.csv (Lightning's CSVLogger),
-Lightning checkpoints, and md_transformer.pt (the whole algorithm, see MDTransformerNet.save).
+The run directory is output_dir/<UTC time as YYYY_MM_DD_hhmmss>, and must be new. It gets train.log (the
+[progress] lines), hparams.yaml (the config, with run_dir) and metrics.csv (Lightning's CSVLogger), Lightning
+checkpoints, and md_transformer.pt (the whole algorithm, see MDTransformerNet.save).
 """
 
 import argparse
@@ -77,8 +79,12 @@ GRADIENT_CLIP_NORM = 1.0
 
 def main() -> None:
     config = parse_args()
+    run_name = time.strftime("%Y_%m_%d_%H%M%S", time.gmtime())
+    config["run_dir"] = os.path.join(config["output_dir"], run_name)
+    # exist_ok=False: a second run started in the same second fails instead of mixing into this one
+    os.makedirs(config["run_dir"], exist_ok=False)
+    print(f"[run] run_dir={config['run_dir']}")
     pl.seed_everything(config["seed"])
-    os.makedirs(config["output"])
     train_paths = event_paths(pt_dir=config["train_dir"])[: config["n_train_events"]]
     # The last validation events: the harness evaluates the first validation file
     val_paths = event_paths(pt_dir=config["val_dir"])[-config["n_val_events"] :]
@@ -91,7 +97,7 @@ def main() -> None:
     # The working point is chosen on validation events, never on training events
     algo.choose_fake_cut(paths=val_paths)
     algo.choose_eps(paths=val_paths)
-    algo.save(path=os.path.join(config["output"], "md_transformer.pt"))
+    algo.save(path=os.path.join(config["run_dir"], "md_transformer.pt"))
     log_md_quality(algo=algo, paths=val_paths)
 
 
@@ -836,13 +842,17 @@ def make_trainer(config: dict) -> pl.Trainer:
         gradient_clip_val=GRADIENT_CLIP_NORM,
         enable_progress_bar=False,
         enable_model_summary=False,
-        # hparams.yaml and metrics.csv directly in the run directory (no name/version subdirectories)
-        logger=pl.loggers.CSVLogger(save_dir=config["output"], name="", version=""),
+        # hparams.yaml and metrics.csv in the run directory: its name (the UTC time) is the version
+        logger=pl.loggers.CSVLogger(
+            save_dir=config["output_dir"],
+            name="",
+            version=os.path.basename(config["run_dir"]),
+        ),
         log_every_n_steps=config["log_every"],
         callbacks=[
             # The epoch with the lowest val_loss, plus last.ckpt
             pl.callbacks.ModelCheckpoint(
-                dirpath=config["output"],
+                dirpath=config["run_dir"],
                 monitor="val_loss",
                 save_last=True,
             ),
@@ -855,8 +865,29 @@ def make_trainer(config: dict) -> pl.Trainer:
 class PrintProgress(pl.Callback):
     """
     A progress bar without carriage returns: one [progress] line per training and validation batch (one event),
-    with how far the epoch is and an estimate of the seconds left in it.
+    with how far the epoch is and an estimate of the seconds left in it. Each line is also appended to train.log in
+    the run directory, as in src/main.py's PrintProgress.
     """
+
+    def __init__(self) -> None:
+        self.log_file = None
+
+    def on_fit_start(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+    ) -> None:
+        self.log_file = open(os.path.join(trainer.log_dir, "train.log"), "a")
+
+    def teardown(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        stage: str,
+    ) -> None:
+        if self.log_file is not None:
+            self.log_file.close()
+            self.log_file = None
 
     def on_train_epoch_start(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
@@ -915,12 +946,14 @@ class PrintProgress(pl.Callback):
         seconds = time.time() - self.start
         seconds_left = seconds / n_done * (n_batches - n_done)
         loss_text = "" if loss is None else f" loss={loss:.4f}"
-        print(
+        line = (
             f"[progress] stage={stage} epoch={epoch} batch={n_done} n_batches={n_batches} "
             f"percent={100 * n_done / n_batches:.1f} seconds={seconds:.0f} "
-            f"seconds_left={seconds_left:.0f}{loss_text}",
-            flush=True,
+            f"seconds_left={seconds_left:.0f}{loss_text}"
         )
+        print(line, flush=True)
+        self.log_file.write(line + "\n")
+        self.log_file.flush()
 
 
 # ---------------------------------------------------------------- network

@@ -70,6 +70,7 @@ Each is one small module with its own test.
 | 2026-11-19 | The MD networks are independent: they never import from or mention each other. Code they share lives in `clustering.py` and `trackcands.py`. |
 | 2026-11-19 | MDTransformer vocabulary: a *patch* is any (η, φ) subset of an event; its *margin* is context around it. Inference uses a *patch grid*: patches with margin 0 that cover the event. |
 | 2026-11-19 | MDTransformer settings, including the run's paths, live in one config yaml (`--config` is the only argument); Lightning saves the hyperparameters as `hparams.yaml`. |
+| 2026-11-20 | MDTransformer runs the same way on phi3 and NRP: the yaml's paths are under `/data` (`/data/mdml/{train,val}`, `output_dir: /data/output/mdml/md_transformer`), which is the PVC on NRP and `transformer-oc/data` bound with `-B data:/data` on phi3. Each run makes its own directory `output_dir/<UTC start time, YYYY_MM_DD_hhmmss>` (also Lightning's logger version, and `run_dir` in the saved config), so the yaml needs no per-run edit; it fails if that directory exists. `PrintProgress` also appends its `[progress]` lines to `run_dir/train.log`, as `src/main.py` does; stdout is left alone. The two machines' output directories are not synchronized. |
 | 2026-11-20 | MDTransformer uses its own attention block (`MDTransformerBlock`, calling `scaled_dot_product_attention` with one boolean mask per patch shared by all heads), not `nn.TransformerEncoderLayer`. On the same weights and a batch of 8 patches × 2,890 MDs, `TransformerEncoderLayer` needed 5.98 GB peak GPU memory against 2.21 GB: `nn.MultiheadAttention` wants one mask per head and turns it into a float mask. Its eval-mode fast path is also a different fused kernel, so eval outputs differed from train (up to 0.02 in the fake logit). Revisit if PyTorch gains a broadcastable boolean mask there. |
 
 ## Running
@@ -77,6 +78,8 @@ Each is one small module with its own test.
 From the repo root, inside the Apptainer image (`--nv` for the GPU):
 
 ```bash
-apptainer exec --nv /ceph/users/atuna/ml-tracking.sif python3 -m mdml.<module>
+apptainer exec --nv -B data:/data /ceph/users/atuna/ml-tracking.sif python3 -m mdml.<module>
 apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m pytest mdml/test_<module>.py
 ```
+
+`-B data:/data` binds `transformer-oc/data` to `/data`, where `md_transformer.yaml` expects the `.pt` files and writes its runs, as on NRP.
