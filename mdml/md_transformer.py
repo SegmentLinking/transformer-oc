@@ -868,9 +868,10 @@ def make_trainer(config: dict) -> pl.Trainer:
         ),
         log_every_n_steps=config["log_every"],
         callbacks=[
-            # The epoch with the lowest val_loss, plus last.ckpt
             pl.callbacks.ModelCheckpoint(
                 dirpath=config["run_dir"],
+                filename="epoch{epoch}_step{step}",
+                auto_insert_metric_name=False,
                 monitor="val_loss",
                 save_last=True,
             ),
