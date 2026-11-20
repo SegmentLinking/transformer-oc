@@ -36,7 +36,9 @@ Open: move away from DBSCAN soon, ideally to a decoder trained with the loss. DB
 
 Open (soon, not now): `MDTransformerNet.predict` and `MDTransformerModule.forward` return a 3-tuple (p(fake) or its logit, kinematics, embedding). That is trending toward a small dataclass of per-MD predictions.
 
-Todo: make the choice of training patch centres configurable: a random MD (now), or uniform in η/φ. Random MDs put more patches in dense regions. The inference patch grid is uniform, so uniform centres would match inference more closely.
+Open (worth studying): same-layer, same-sim MD pairs are many, and their |Δη| is not small. Barrel diagonals have 4.7k–19.5k pairs (most in layer 6) in 20 training events. Their q0.9 |Δη| is 0.11–0.36, except 0.03 in layer 1, while their q0.9 |Δφ| is only 0.01–0.2. A prompt track should cross a layer once, or twice in module overlaps with tiny Δη. Candidates: loopers re-crossing at another z, secondaries, tilted inner-barrel modules. From `LayerPairWindows.from_events` (window_quantile 0.9, first 20 training events).
+
+Todo: make the choice of training patch centres configurable: a random MD (now), or drawn at random from a uniform distribution in η (|η| ≤ 2.8) and φ. Random MDs put more patches in dense regions. The inference patch grid is not random (evenly spaced centres), but it gives every η/φ region one patch, so on average uniformly drawn centres would cover the detector the way inference does.
 
 ## Pieces, bottom-up
 
@@ -64,6 +66,7 @@ Each is one small module with its own test.
 | 2026-11-19 | The MD networks are independent: they never import from or mention each other. Code they share lives in `clustering.py` and `trackcands.py`. |
 | 2026-11-19 | MDTransformer vocabulary: a *patch* is any (η, φ) subset of an event; its *margin* is context around it. Inference uses a *patch grid*: patches with margin 0 that cover the event. |
 | 2026-11-19 | MDTransformer settings, including the run's paths, live in one config yaml (`--config` is the only argument); Lightning saves the hyperparameters as `hparams.yaml`. |
+| 2026-11-20 | MDTransformer uses its own attention block (`MDTransformerBlock`, calling `scaled_dot_product_attention` with one boolean mask per patch shared by all heads), not `nn.TransformerEncoderLayer`. On the same weights and a batch of 8 patches × 2,890 MDs, `TransformerEncoderLayer` needed 5.98 GB peak GPU memory against 2.21 GB: `nn.MultiheadAttention` wants one mask per head and turns it into a float mask. Its eval-mode fast path is also a different fused kernel, so eval outputs differed from train (up to 0.02 in the fake logit). Revisit if PyTorch gains a broadcastable boolean mask there. |
 
 ## Running
 
