@@ -494,26 +494,110 @@ class MDTransformerLightningModule(pl.LightningModule):
     """
 
     def __init__(self, config: dict, module: "MDTransformerModule") -> None:
-        raise NotImplementedError()
+        super().__init__()
+        self.save_hyperparameters(config)
+        self.config = config
+        self.module = module
+        # One (bce, mse, contrastive) row per validation event, averaged at the end of the epoch
+        self.val_losses = []
+        self.start = time.time()
 
     def losses(
         self,
         batch: PatchBatch,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """(bce, mse, contrastive), each unweighted; contrastive is 0 if embed_dim is 0."""
-        raise NotImplementedError()
+        md_predIsFakeLogit, md_predKinematics, md_predEmbedding = self.module(
+            batch=batch
+        )
+        md_isInLoss = batch.md_isValid & ~batch.md_isMargin
+        bce = nn.functional.binary_cross_entropy_with_logits(
+            md_predIsFakeLogit[md_isInLoss],
+            batch.md_simIsFake[md_isInLoss].float(),
+        )
+        md_isReal = md_isInLoss & ~batch.md_simIsFake
+        mse = nn.functional.mse_loss(
+            md_predKinematics[md_isReal],
+            batch.md_simKinematics[md_isReal],
+        )
+        if self.config["embed_dim"] > 0:
+            contrastive = contrastive_loss(
+                md_embedding=md_predEmbedding,
+                batch=batch,
+                contrastive_margin=self.config["contrastive_margin"],
+            )
+        else:
+            contrastive = torch.zeros((), device=bce.device)
+        return bce, mse, contrastive
+
+    def total_loss(
+        self,
+        bce: torch.Tensor,
+        mse: torch.Tensor,
+        contrastive: torch.Tensor,
+    ) -> torch.Tensor:
+        return (
+            bce
+            + self.config["mse_weight"] * mse
+            + self.config["contrastive_weight"] * contrastive
+        )
 
     def training_step(self, batch: PatchBatch, batch_idx: int) -> torch.Tensor:
-        raise NotImplementedError()
+        bce, mse, contrastive = self.losses(batch=batch)
+        loss = self.total_loss(bce=bce, mse=mse, contrastive=contrastive)
+        # To metrics.csv, every log_every steps (make_trainer)
+        self.log("train_loss", loss, batch_size=1)
+        if batch_idx % self.config["log_every"] == 0:
+            gpu_mem = (
+                torch.cuda.max_memory_allocated() / 1e9
+                if torch.cuda.is_available()
+                else 0.0
+            )
+            print(
+                f"[train] epoch={self.current_epoch} step={batch_idx} loss={loss.item():.4f} "
+                f"loss_bce={bce.item():.4f} loss_mse={mse.item():.4f} "
+                f"loss_contrastive={contrastive.item():.4f} n_patches={batch.md_inputs.shape[0]} "
+                f"n_md_max={batch.md_inputs.shape[1]} gpu_mem_peak_gb={gpu_mem:.2f} "
+                f"seconds={time.time() - self.start:.0f}",
+                flush=True,
+            )
+        return loss
 
     def validation_step(self, batch: PatchBatch, batch_idx: int) -> None:
-        raise NotImplementedError()
+        self.val_losses.append(torch.stack(self.losses(batch=batch)))
 
     def on_validation_epoch_end(self) -> None:
-        raise NotImplementedError()
+        bce, mse, contrastive = torch.stack(self.val_losses).mean(dim=0)
+        n_events = len(self.val_losses)
+        self.val_losses.clear()
+        loss = self.total_loss(bce=bce, mse=mse, contrastive=contrastive)
+        # val_loss picks the best checkpoint (make_trainer)
+        self.log("val_loss", loss)
+        print(
+            f"[val] epoch={self.current_epoch} n_events={n_events} loss={loss.item():.4f} "
+            f"loss_bce={bce.item():.4f} loss_mse={mse.item():.4f} "
+            f"loss_contrastive={contrastive.item():.4f} seconds={time.time() - self.start:.0f}",
+            flush=True,
+        )
 
     def configure_optimizers(self) -> dict:
-        raise NotImplementedError()
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.config["lr"],
+            weight_decay=self.config["weight_decay"],
+        )
+        total_steps = self.trainer.estimated_stepping_batches
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=self.config["lr"],
+            total_steps=total_steps,
+            # 5% warm-up, but at least 3 steps, so that short test runs work
+            pct_start=max(0.05, 3 / total_steps),
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+        }
 
 
 def contrastive_loss(
