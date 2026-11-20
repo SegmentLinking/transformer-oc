@@ -539,14 +539,41 @@ def make_trainer(config: dict) -> pl.Trainer:
 
 class MDTransformerModule(nn.Module):
     """
-    A per-MD input MLP, n_blocks pre-norm transformer encoder layers (nn.TransformerEncoderLayer) with the
-    layer-pair window mask, and a head -> (fake logit, SIM_KINEMATICS, embedding). The head's hidden layer is
+    A per-MD input MLP, n_blocks MDTransformerBlocks with the layer-pair window mask, and a head -> (fake logit,
+    SIM_KINEMATICS, embedding). The head's hidden layer is
     shared; only its last linear layer has separate rows per output. The windows are buffers, so they are saved
     with the state_dict.
     """
 
     def __init__(self, config: dict, windows: LayerPairWindows) -> None:
-        raise NotImplementedError()
+        super().__init__()
+        hidden = config["hidden"]
+        n_inputs = N_INPUTS + (N_ABSOLUTE_PHI_INPUTS if config["absolute_phi"] else 0)
+        self.input_mlp = nn.Sequential(
+            nn.Linear(n_inputs, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+        )
+        self.blocks = nn.ModuleList(
+            [
+                MDTransformerBlock(
+                    hidden=hidden,
+                    n_heads=config["n_heads"],
+                    dropout=config["dropout"],
+                )
+                for _ in range(config["n_blocks"])
+            ]
+        )
+        # Pre-norm blocks leave their output unnormalised
+        self.norm = nn.LayerNorm(hidden)
+        # Outputs: fake logit, SIM_KINEMATICS, embedding
+        self.head = nn.Sequential(
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 1 + len(SIM_KINEMATICS) + config["embed_dim"]),
+        )
+        self.register_buffer("window_eta", windows.eta.clone())
+        self.register_buffer("window_phi", windows.phi.clone())
 
     def forward(
         self,
@@ -556,16 +583,77 @@ class MDTransformerModule(nn.Module):
         md_predIsFakeLogit (n_patches, n_md_max), md_predKinematics (n_patches, n_md_max, 4) and
         md_predEmbedding (n_patches, n_md_max, embed_dim), with phi relative to the patch centre.
         """
-        raise NotImplementedError()
+        mask = self.attention_mask(batch=batch)
+        hid = self.input_mlp(batch.md_inputs)
+        for block in self.blocks:
+            hid = block(hid=hid, mask=mask)
+        out = self.head(self.norm(hid))
+        n_kinematics = len(SIM_KINEMATICS)
+        return out[..., 0], out[..., 1 : 1 + n_kinematics], out[..., 1 + n_kinematics :]
 
     def attention_mask(self, batch: PatchBatch) -> torch.Tensor:
         """
-        (n_patches * n_heads, n_md_max, n_md_max), True where attention is blocked: a padded key, or a key outside
-        the query's layer-pair window. Inside means strictly |deta| < window and |dphi| < window, so zero-width
-        windows (window_scale 0) leave only self-attention: MDs sharing an anchor hit have identical (eta, phi).
-        Every MD attends to itself, so no row is fully blocked.
+        (n_patches, 1, n_md_max, n_md_max), True where a query (dim 2) may attend to a key (dim 3), as
+        scaled_dot_product_attention wants; the 1 broadcasts over heads. Allowed: a valid key inside the query's
+        layer-pair window, strictly |deta| < window and |dphi| < window, so zero-width windows (window_scale 0)
+        leave only self-attention: MDs sharing an anchor hit have identical (eta, phi). Every MD attends to
+        itself, so no row is empty.
         """
-        raise NotImplementedError()
+        md_pos = batch.md_pos
+        # (n_patches, n_md_max, n_md_max): query along dim 1, key along dim 2
+        layer_query = batch.md_layer[:, :, None]
+        layer_key = batch.md_layer[:, None, :]
+        abs_deta = (md_pos[:, :, None, 0] - md_pos[:, None, :, 0]).abs()
+        abs_dphi = wrap_phi(md_pos[:, :, None, 1] - md_pos[:, None, :, 1]).abs()
+        is_allowed = (
+            batch.md_isValid[:, None, :]
+            & (abs_deta < self.window_eta[layer_query, layer_key])
+            & (abs_dphi < self.window_phi[layer_query, layer_key])
+        )
+        n_md_max = md_pos.shape[1]
+        is_allowed |= torch.eye(n_md_max, dtype=torch.bool, device=md_pos.device)
+        return is_allowed[:, None]
+
+
+class MDTransformerBlock(nn.Module):
+    """
+    A pre-norm transformer block: masked multi-head self-attention, then a feed-forward layer (width 2 * hidden),
+    each in a residual. Attention is scaled_dot_product_attention with one boolean mask per patch, shared by all
+    heads (see the README decision on nn.TransformerEncoderLayer).
+    """
+
+    def __init__(self, hidden: int, n_heads: int, dropout: float) -> None:
+        super().__init__()
+        self.n_heads = n_heads
+        self.norm1 = nn.LayerNorm(hidden)
+        # Query, key and value of every head in one linear layer
+        self.qkv = nn.Linear(hidden, 3 * hidden)
+        self.out = nn.Linear(hidden, hidden)
+        self.norm2 = nn.LayerNorm(hidden)
+        self.ff = nn.Sequential(
+            nn.Linear(hidden, 2 * hidden),
+            nn.GELU(),
+            nn.Linear(2 * hidden, hidden),
+        )
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, hid: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """hid (n_patches, n_md_max, hidden) -> same shape; mask from MDTransformerModule.attention_mask."""
+        n_patches, n_md_max, hidden = hid.shape
+        qkv = self.qkv(self.norm1(hid)).view(
+            n_patches, n_md_max, 3, self.n_heads, hidden // self.n_heads
+        )
+        # Each (n_patches, n_heads, n_md_max, hidden // n_heads)
+        query, key, value = qkv.permute(2, 0, 3, 1, 4)
+        att = nn.functional.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=mask,
+        )
+        att = att.transpose(1, 2).reshape(n_patches, n_md_max, hidden)
+        hid = hid + self.drop(self.out(att))
+        return hid + self.drop(self.ff(self.norm2(hid)))
 
 
 # ---------------------------------------------------------------- per-MD quality
