@@ -5,17 +5,48 @@ You can run me like:
 > cd src && apptainer exec /ceph/users/atuna/ml-tracking.sif python3 test_hit_targets.py
 """
 import torch
+from torch_geometric.data import Data
 
 from constants import HIT_UNMATCHED
-from utils.hit_targets import hit_targets
+from utils.hit_targets import hit_candidates, hit_targets as _hit_targets
 
 U = HIT_UNMATCHED
 
 
 def _table(rows):
-    """hit_sim_candidates from a list of candidate lists, padded with HIT_UNMATCHED."""
+    """A table of candidates per distinct hit, from a list of candidate lists, padded with HIT_UNMATCHED."""
     width = max(1, max(len(r) for r in rows))
     return torch.tensor([r + [U] * (width - len(r)) for r in rows], dtype=torch.int64)
+
+
+def hit_targets(hit_id, table, min_matched_hits):
+    """hit_targets on the (N, H, K) candidates of T3s whose hits are rows hit_id of the table."""
+    return _hit_targets(table[hit_id], min_matched_hits=min_matched_hits)
+
+
+def test_hit_candidates_pads_and_stacks_slots():
+    # two T3s, three hit slots of different widths
+    graph = Data(
+        x=torch.zeros(2, 1),
+        hit_0_simIdxs=torch.tensor([[7], [U]]),
+        hit_2_simIdxs=torch.tensor([[5, 3, U], [U, U, U]]),
+        hit_1_simIdxs=torch.tensor([[7, 2], [4, U]]),
+    )
+    cand = hit_candidates(graph)
+    assert cand.shape == (2, 3, 3)
+    assert cand[0].tolist() == [[7, U, U], [7, 2, U], [5, 3, U]]
+    assert cand[1].tolist() == [[U, U, U], [4, U, U], [U, U, U]]
+    target, frac = _hit_targets(cand, min_matched_hits=1)
+    assert target.tolist() == [7, 4]
+    assert torch.allclose(frac, torch.tensor([2 / 3, 1 / 3]))
+
+
+def test_hit_candidates_missing_slots_raises():
+    try:
+        hit_candidates(Data(x=torch.zeros(1, 1), hit_1_simIdxs=torch.tensor([[1]])))
+    except ValueError:
+        return
+    raise AssertionError("hit_candidates did not raise ValueError for slots not numbered from 0")
 
 
 def test_counts_and_threshold():
@@ -36,7 +67,7 @@ def test_hit_counts_for_every_candidate():
     assert target.tolist() == [5] and frac.item() == 1.0
 
 
-def test_shared_hits_are_looked_up_by_id():
+def test_shared_hits():
     # two T3s sharing hits 4 and 5 of the table
     cand = _table([[1], [1], [1], [1], [1], [1], [2], [2], [2], [2]])
     hit_id = torch.tensor([[0, 1, 2, 3, 4, 5], [4, 5, 6, 7, 8, 9]])

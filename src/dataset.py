@@ -1,15 +1,31 @@
 import os
+import re
 import torch
 from torch_geometric.data import Dataset
 import glob
 
-from constants import LS_FEATURE_MIN, LS_FEATURE_MAX, T3_FEATURE_MIN, T3_FEATURE_MAX
-from constants import T3_ETA_COLUMN, T3_PHI_COLUMN, ETA_MIN, ETA_MAX, PHI_MIN, PHI_MAX
+from constants import FEATURE_NAMES, ETA_FEATURE, PHI_FEATURE, T3_FEATURE_MIN, T3_FEATURE_MAX
+from constants import ETA_MIN, ETA_MAX, PHI_MIN, PHI_MAX
+from normalization import check_feature_count, check_normalization, log_transform
 
-# Graph fields with one row per T3, which are cut by the eta/phi mask.
-# sim_features (one row per sim particle) and hit_sim_candidates (one row per distinct hit,
-# indexed by hit_id) are deliberately not cut.
-PER_T3_FIELDS = ["x", "sim_index", "md_layer", "md_simIdx", "hit_layer", "hit_simIdx", "hit_id"]
+# Graph fields that are NOT one row per T3, and so are not cut by the eta/phi mask.
+# Every other tensor field must have one row per T3 and is cut (see apply_eta_phi_mask).
+NON_T3_FIELDS = ["sim_features"]
+
+
+def legacy_normalization():
+    """The hardcoded normalization from src/constants.py, for checkpoints trained before it was computed from data."""
+    return {"names": list(FEATURE_NAMES), "min": T3_FEATURE_MIN, "max": T3_FEATURE_MAX, "log": ["t3_pt"]}
+
+
+def natural_sort_key(path):
+    """Sort key so that numbers in file names sort numerically: entry_2 before entry_10, graph_2 before graph_10."""
+    return [int(tok) if tok.isdigit() else tok for tok in re.split(r"(\d+)", os.path.basename(path))]
+
+
+def list_graph_files(data_dir):
+    """All .pt graph files in data_dir, in natural order (e.g. LSTNtuple_<name>.root.entry_<N>.pt, or graph_<N>.pt)."""
+    return sorted(glob.glob(os.path.join(data_dir, "*.pt")), key=natural_sort_key)
 
 
 class PCDataset(Dataset):
@@ -21,8 +37,22 @@ class PCDataset(Dataset):
         phi_mask_half_width=None,
         eta_mask_center=0.0,
         phi_mask_center=0.0,
+        normalization=None,
     ):
+        """
+        normalization: dict from normalization.compute_normalization (per-feature min/max and log columns).
+        None falls back to the legacy hardcoded ranges in src/constants.py.
+        """
         self.data_dir = data_dir
+        if normalization is None:
+            normalization = legacy_normalization()
+        check_normalization(normalization, FEATURE_NAMES)
+        self.normalization = normalization
+        self.log_features = list(normalization["log"])
+        self.feature_min = torch.tensor(normalization["min"], dtype=torch.float32)
+        self.feature_max = torch.tensor(normalization["max"], dtype=torch.float32)
+        self.eta_column = FEATURE_NAMES.index(ETA_FEATURE)
+        self.phi_column = FEATURE_NAMES.index(PHI_FEATURE)
         self.subset = subset if subset is not None else float('inf')
 
         # eta/phi mask: A center of None means it is drawn at random for every event.
@@ -38,8 +68,7 @@ class PCDataset(Dataset):
         self.eta_mask_half_width = eta_mask_half_width
         self.phi_mask_half_width = phi_mask_half_width
 
-        self.graph_files = glob.glob(os.path.join(data_dir, "graph_*.pt"))
-        self.graph_files.sort(key=lambda fn: int(os.path.basename(fn).removeprefix("graph_").removesuffix(".pt")))
+        self.graph_files = list_graph_files(data_dir)
 
         if len(self.graph_files) == 0:
             raise ValueError(f"No graph files found in {data_dir}")
@@ -50,27 +79,25 @@ class PCDataset(Dataset):
     def __getitem__(self, idx):
         graph_path = self.graph_files[idx]
         graph = torch.load(graph_path, map_location='cpu', weights_only=False)
-        graph.filename = os.path.basename(graph_path)
+        check_feature_count(graph.x, FEATURE_NAMES, graph_path)
+
+        # Raw (unnormalized) eta/phi of every T3, for the model's Delta R neighbor search
+        graph.eta = graph.x[:, self.eta_column].clone()
+        graph.phi = graph.x[:, self.phi_column].clone()
 
         self.apply_eta_phi_mask(graph)
 
-        graph.x[:, 0] = torch.log(graph.x[:, 0] + 1e-6)
+        x = log_transform(graph.x, FEATURE_NAMES, self.log_features)
+        graph.x = (x - self.feature_min) / (self.feature_max - self.feature_min + 1e-8)
 
-        if graph.x.shape[1] == len(LS_FEATURE_MIN):
-            min_vals = torch.tensor(LS_FEATURE_MIN)
-            max_vals = torch.tensor(LS_FEATURE_MAX)
-        else:
-            min_vals = torch.tensor(T3_FEATURE_MIN)
-            max_vals = torch.tensor(T3_FEATURE_MAX)
-
-        graph.x = (graph.x - min_vals) / (max_vals - min_vals + 1e-8)
-
+        graph.filename = os.path.basename(graph_path)
         return graph
 
     def apply_eta_phi_mask(self, graph):
         """
-        Cut all per-T3 fields of `graph` in place to the eta/phi mask region, and
-        attach the centers used as graph.eta_mask_center and graph.phi_mask_center.
+        Cut all per-T3 fields of `graph` (every tensor field except NON_T3_FIELDS) in place to
+        the eta/phi mask region, and attach the centers used as graph.eta_mask_center and
+        graph.phi_mask_center.
 
         With no half widths (full event), the centers are attached and nothing is cut.
         """
@@ -89,17 +116,27 @@ class PCDataset(Dataset):
             return
 
         mask = eta_phi_mask(
-            eta=graph.x[:, T3_ETA_COLUMN],
-            phi=graph.x[:, T3_PHI_COLUMN],
+            eta=graph.x[:, self.eta_column],
+            phi=graph.x[:, self.phi_column],
             eta_center=eta_center,
             phi_center=phi_center,
             eta_half_width=self.eta_mask_half_width,
             phi_half_width=self.phi_mask_half_width,
         )
 
-        for field in PER_T3_FIELDS:
-            if field in graph:
-                graph[field] = graph[field][mask]
+        n_t3 = graph.x.shape[0]
+        per_t3 = []
+        for field, value in graph:
+            if field in NON_T3_FIELDS or not torch.is_tensor(value) or value.dim() == 0:
+                continue
+            if value.shape[0] != n_t3:
+                raise ValueError(
+                    f"Graph field {field} has {value.shape[0]} rows but there are {n_t3} T3s. "
+                    f"If it is not a per-T3 field, add it to NON_T3_FIELDS in dataset.py."
+                )
+            per_t3.append(field)
+        for field in per_t3:
+            graph[field] = graph[field][mask]
 
     def get_feature_dims(self):
         sample = self[0]

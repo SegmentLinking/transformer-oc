@@ -18,23 +18,48 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, Learning
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch_geometric.loader import DataLoader
 
-from dataset import PCDataset
+from constants import FEATURE_NAMES, LOG_FEATURES
+from dataset import PCDataset, list_graph_files
 from helpers import set_seed, load_config
+from normalization import compute_normalization, load_normalization, save_normalization
+
+# Number of training files the feature normalization is computed from, unless normalization_n_files is set
+DEFAULT_NORMALIZATION_N_FILES = 20
 
 
 class ParticleTrackingDataModule(pl.LightningDataModule):
-    def __init__(self, config):
+    def __init__(self, config, normalization=None):
+        """
+        normalization: feature normalization (see normalization.py) to use, e.g. from a checkpoint
+        being resumed. None: load it from config['normalization_file'] if set, otherwise compute it
+        from config['normalization_n_files'] training files.
+        """
         super().__init__()
         self.config = config
         self.save_hyperparameters(config)
-        
+        self.normalization = normalization
+
+    def get_normalization(self):
+        if self.normalization is not None:
+            return self.normalization
+        path = self.config.get('normalization_file')
+        if path:
+            print(f"Loading feature normalization from {path}")
+            return load_normalization(path)
+        n_files = self.config.get('normalization_n_files', DEFAULT_NORMALIZATION_N_FILES)
+        files = list_graph_files(self.config['train_data_dir'])
+        print(f"Computing feature normalization from {n_files if n_files is not None else 'all'} of {len(files)} training files")
+        return compute_normalization(files, names=FEATURE_NAMES, log_features=LOG_FEATURES, n_files=n_files)
+
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
+            self.normalization = self.get_normalization()
             mask_kwargs = {
                 "eta_mask_center": self.config["eta_mask_center"],
                 "phi_mask_center": self.config["phi_mask_center"],
                 "eta_mask_half_width": self.config["eta_mask_half_width"],
                 "phi_mask_half_width": self.config["phi_mask_half_width"],
+                "normalization": self.normalization,
             }
             self.train_dataset = PCDataset(
                 self.config['train_data_dir'],
@@ -132,7 +157,14 @@ class Trainer:
         self.config = config
 
     def train(self):
-        data_module = ParticleTrackingDataModule(self.config)
+        # When resuming, reuse the checkpoint's normalization so the features don't change mid-training
+        normalization = None
+        if self.config.get('resume'):
+            ckpt = torch.load(self.config['resume'], map_location='cpu', weights_only=False)
+            normalization = ckpt.get('hyper_parameters', {}).get('normalization')
+            del ckpt
+
+        data_module = ParticleTrackingDataModule(self.config, normalization=normalization)
         data_module.setup('fit')
         feature_dims = data_module.get_feature_dims()
         
@@ -141,7 +173,8 @@ class Trainer:
             from model import TransformerLightningModule
             model = TransformerLightningModule(
                 self.config,
-                input_dim=feature_dims['node_features_dim']
+                input_dim=feature_dims['node_features_dim'],
+                normalization=data_module.normalization,
             )
         else:
             raise ValueError(f"Unknown model type: {model_type}")
@@ -155,6 +188,12 @@ class Trainer:
             default_hp_metric=True,
         )
         
+        # Also save the normalization next to the checkpoints, for inference (analysis/main.py)
+        os.makedirs(tb_logger.log_dir, exist_ok=True)
+        normalization_path = os.path.join(tb_logger.log_dir, 'normalization.json')
+        save_normalization(data_module.normalization, normalization_path)
+        print(f"Feature normalization saved to {normalization_path}")
+
         debug_mode = self.config.get('debug', False)
         
         checkpoint_callback = ModelCheckpoint(

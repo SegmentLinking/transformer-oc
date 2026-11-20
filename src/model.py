@@ -6,7 +6,7 @@ from torch.optim.lr_scheduler import MultiStepLR
 
 from constants import BYTES_PER_GB
 from utils.object_condensation import ObjectCondensation
-from utils.hit_targets import hit_targets
+from utils.hit_targets import hit_candidates, hit_targets
 from utils.torch_geometric_interface import row_splits_from_strict_batch as batch_to_rowsplits
 
 import pytorch_lightning as pl
@@ -147,28 +147,38 @@ class TransformerOCModel(nn.Module):
         nn.init.xavier_uniform_(self.latent_head[-1].weight)
         nn.init.zeros_(self.latent_head[-1].bias)
 
+    @staticmethod
+    def legacy_eta_phi(x_norm):
+        """
+        Approximate eta/phi from columns 1 and 2 of the normalized features, with the hardcoded ranges
+        used before the dataset attached raw eta/phi. Only for callers that don't pass eta/phi yet
+        (analysis scripts): the ranges don't match the normalization, so eta is off by a few percent.
+        """
+        eta = x_norm[:, 1] * (2.62 - (-2.62)) + (-2.62)
+        phi = x_norm[:, 2] * (3.1416 - (-3.1416)) + (-3.1416)
+        return eta, phi
+
     @torch.no_grad()
-    def build_neighbor_index(self, x_raw, batch):
+    def build_neighbor_index(self, eta, phi, batch):
         """
         Fully vectorized ΔR neighbor index construction — no Python loops over nodes.
 
         Processes nodes in chunks of `chunk_size` rows at a time to keep peak
         memory at O(N * chunk_size) instead of O(N²).
 
+        Args:
+            eta, phi: [N] raw (unnormalized) eta and phi of every node
+            batch:    [N] graph index of every node
+
         Returns:
             neighbor_idx:  [N, k]  int64 — neighbor indices, padded with 0
             neighbor_mask: [N, k]  bool  — True = padding (ignore in attention)
         """
-        device = x_raw.device
-        N = x_raw.shape[0]
+        device = eta.device
+        N = eta.shape[0]
         k = self.max_neighbors
-
-        eta_norm = x_raw[:, 1]
-        phi_norm = x_raw[:, 2]
-        eta_min, eta_max = -2.62, 2.62
-        phi_min, phi_max = -3.1416, 3.1416
-        eta = eta_norm * (eta_max - eta_min) + eta_min  # [N]
-        phi = phi_norm * (phi_max - phi_min) + phi_min  # [N]
+        eta = eta.float()
+        phi = phi.float()
 
         neighbor_idx  = torch.zeros(N, k, dtype=torch.long, device=device)
         neighbor_mask = torch.ones (N, k, dtype=torch.bool, device=device)
@@ -216,8 +226,14 @@ class TransformerOCModel(nn.Module):
 
         return neighbor_idx, neighbor_mask
 
-    def forward(self, x_raw, batch):
-        neighbor_idx, neighbor_mask = self.build_neighbor_index(x_raw, batch)
+    def forward(self, x_raw, batch, eta=None, phi=None):
+        """
+        x_raw: [N, F] normalized node features. eta, phi: [N] raw eta/phi for the ΔR neighbors
+        (graph.eta / graph.phi from PCDataset). Without them, falls back to legacy_eta_phi.
+        """
+        if eta is None or phi is None:
+            eta, phi = self.legacy_eta_phi(x_raw)
+        neighbor_idx, neighbor_mask = self.build_neighbor_index(eta, phi, batch)
 
         x = self.input_proj(x_raw)
 
@@ -236,11 +252,13 @@ class TransformerOCModel(nn.Module):
     
 
 class TransformerLightningModule(pl.LightningModule):
-    def __init__(self, config, input_dim):
+    def __init__(self, config, input_dim, normalization=None):
         super().__init__()
         
         hparams = {
             'input_dim': input_dim,
+            # Feature normalization the model was trained with (see normalization.py), so inference can reuse it
+            'normalization': normalization,
             'hidden_dim': config.get('hidden_dim', config.get('d_model', 128)),
             'num_layers': config['num_layers'],
             'num_heads': config['nhead'],
@@ -264,8 +282,8 @@ class TransformerLightningModule(pl.LightningModule):
             'oc_repulsive_chunk_size': config.get('oc_repulsive_chunk_size', 32),
 
             # Put the hit fraction into the loss instead of a real/fake cut: every T3 with a hit on a sim
-            # track belongs to its best sim track with fraction f = matched hits / 6 (from hit_id and
-            # hit_sim_candidates), and the OC loss uses f continuously. False: sim_index targets (standard OC).
+            # track belongs to its best sim track with fraction f = matched hits / H (from the per-hit
+            # hit_{k}_simIdxs fields), and the OC loss uses f continuously. False: sim_index targets (standard OC).
             'hit_fraction_loss': config.get('hit_fraction_loss', False),
             
             'epochs': config.get('epochs', 100),
@@ -306,18 +324,17 @@ class TransformerLightningModule(pl.LightningModule):
             asso_idx = data.sim_index.to(self.device).to(torch.int64)
             asso_idx[asso_idx < 0] = -1
             return asso_idx.unsqueeze(-1), None
-        if data.num_graphs != 1:
-            raise ValueError("hit_fraction_loss needs one event per batch (PyG does not offset hit_id across graphs)")
         # min_matched_hits=1: every T3 with a matched hit has a target; fraction 0 exactly for noise
-        target, frac = hit_targets(data.hit_id.to(self.device), data.hit_sim_candidates.to(self.device), 1)
+        target, frac = hit_targets(hit_candidates(data).to(self.device), 1)
         return target.unsqueeze(-1), frac.unsqueeze(-1)
     
     def training_step(self, data):
         x, batch = data.x.to(self.device), data.batch.to(self.device)
+        eta, phi = data.eta.to(self.device), data.phi.to(self.device)
         asso_idx, fractions = self.oc_targets(data)
         row_splits = batch_to_rowsplits(batch)
         
-        model_out = self.model(x, batch)
+        model_out = self.model(x, batch, eta=eta, phi=phi)
         beta = model_out["B"].float()
         coords = model_out["H"].float()
 
@@ -353,10 +370,11 @@ class TransformerLightningModule(pl.LightningModule):
 
     def validation_step(self, data):
         x, batch = data.x.to(self.device), data.batch.to(self.device)
+        eta, phi = data.eta.to(self.device), data.phi.to(self.device)
         asso_idx, fractions = self.oc_targets(data)
         row_splits = batch_to_rowsplits(batch)
 
-        model_out = self.model(x, batch)
+        model_out = self.model(x, batch, eta=eta, phi=phi)
         beta = model_out["B"].float()
         coords = model_out["H"].float()
 
