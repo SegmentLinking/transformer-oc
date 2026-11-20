@@ -27,6 +27,10 @@ In progress: `md_transformer.py` is an outline, filled in one piece at a time. S
 
 Open: the layer-pair windows come from a quantile of same-sim MD pairs (`window_quantile`). They reflect the physics, so they should be stable across events and runs; once checked, replace `window_quantile` with the per-layer-pair η/φ windows themselves in the yaml (keep `window_scale`).
 
+Open: MDs with no sim have every sim feature at −999 in the `.pt` files. `MDInputs.from_mds` turns their sim kinematics into `nan`, so any accidental use shows up at once. Later (not now), `md_processing.py` could write `nan` for missing fields directly.
+
+Open: test `absolute_phi: true` once performance approaches T5. The network is φ-symmetric by default, but the detector is not, even in simulation: modules are rectangles assembled into a periodic mechanical structure. The effect may be negligible. Real data adds more φ asymmetry (dead channels, misalignment).
+
 ## Pieces, bottom-up
 
 Each is one small module with its own test.
