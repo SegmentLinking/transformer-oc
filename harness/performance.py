@@ -1,9 +1,10 @@
 """
 Evaluate track candidates' performance on one dataset: efficiency, fake rate and duplicate rate, as key=value logs and pdf plots. The track candidates are LST T5s, a ground-truth check of the harness from MDs matched to sims, or
-SimpleMDNet's (--trackcands).
+an MD network's: SimpleMDNet or MDTransformer (--trackcands).
 
 The dataset's LSTNtuple files come from its file list (val.txt from md_processing.py), and are read from a directory
-of nominal-mode LSTNtuples. Every event of each file is evaluated. SimpleMDNet reads each event's .pt file from md_processing.py, in the --pt-dir directory.
+of nominal-mode LSTNtuples. Every event of each file is evaluated. The MD networks (SimpleMDNet, MDTransformer) read
+each event's .pt file from md_processing.py, in the --pt-dir directory.
 
 From the repo root:
 apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.performance \
@@ -13,7 +14,9 @@ apptainer exec /ceph/users/atuna/ml-tracking.sif python3 -m harness.performance 
     --trackcands t5 \
     --output output
 
-For SimpleMDNet, --trackcands simple_mdnet --simple-mdnet output/mdml/run_<date>/simple_mdnet.pt.
+For SimpleMDNet, --trackcands simple_mdnet --model output/mdml/run_<date>/simple_mdnet.pt.
+For MDTransformer, --trackcands md_transformer --model output/mdml/md_transformer/run_<date>/md_transformer.pt
+--device cuda --n-files 1: its working point is chosen on the last validation events, so evaluate the first file only.
 """
 
 import argparse
@@ -40,9 +43,11 @@ from harness.trackcands import (
     trackcands_from_mds_matched_to_sim,
     trackcands_from_t5s,
 )
+from mdml.md_transformer import MDTransformerNet
 from mdml.simple_mdnet import SimpleMDNet
 
-TRACKCAND_SOURCES = ["t5", "mds_matched_to_sim", "simple_mdnet"]
+TRACKCAND_SOURCES = ["t5", "mds_matched_to_sim", "simple_mdnet", "md_transformer"]
+MDNET_CLASSES = {"simple_mdnet": SimpleMDNet, "md_transformer": MDTransformerNet}
 PT_BINS = np.geomspace(0.1, 50.0, 28)
 ETA_BINS = np.linspace(-2.4, 2.4, 25)
 PHI_BINS = np.linspace(-np.pi, np.pi, 25)
@@ -102,10 +107,15 @@ def main() -> None:
     if args.n_files is not None:
         lstntuple_files = lstntuple_files[: args.n_files]
     simple_mdnet = None
-    if args.trackcands == "simple_mdnet":
-        if not args.simple_mdnet or not os.path.exists(args.simple_mdnet):
-            raise FileNotFoundError(f"SimpleMDNet model not found at {args.simple_mdnet}")
-        simple_mdnet = SimpleMDNet.load(path=args.simple_mdnet, device="cpu")
+    if args.trackcands in MDNET_CLASSES:
+        if not args.model or not os.path.exists(args.model):
+            raise FileNotFoundError(
+                f"{args.trackcands} model not found at {args.model}"
+            )
+        simple_mdnet = MDNET_CLASSES[args.trackcands].load(
+            path=args.model,
+            device=args.device,
+        )
     all_perfs = evaluate_events(
         lstntuple_files=lstntuple_files,
         lstntuple_dir=args.lstntuple_dir,
@@ -168,9 +178,15 @@ def parse_args() -> argparse.Namespace:
         help="mds_matched_to_sim only: keep sims whose MDs span at least this many layers",
     )
     parser.add_argument(
-        "--simple-mdnet",
+        "--model",
         default=None,
-        help="simple_mdnet only: a saved SimpleMDNet, e.g. output/mdml/run_<date>/simple_mdnet.pt",
+        help="MD networks only: the saved network, e.g. output/mdml/run_<date>/simple_mdnet.pt"
+        " or output/mdml/md_transformer/run_<date>/md_transformer.pt",
+    )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="MD networks only: where the network runs, e.g. cuda for md_transformer",
     )
     parser.add_argument(
         "--output",
@@ -193,7 +209,7 @@ def evaluate_events(
     trackcand_source: str,
     drop_duplicate_cleaned: bool,
     min_layers: int,
-    simple_mdnet: SimpleMDNet | None,
+    simple_mdnet: SimpleMDNet | MDTransformerNet | None,
 ) -> list[Performance]:
     """
     Evaluate every event of each LSTNtuple file, opening each file and reading entries one at a time.
@@ -251,7 +267,7 @@ def evaluate_event(
     trackcand_source: str,
     drop_duplicate_cleaned: bool,
     min_layers: int,
-    simple_mdnet: SimpleMDNet | None,
+    simple_mdnet: SimpleMDNet | MDTransformerNet | None,
     pt_path: str,
 ) -> Performance:
     """
