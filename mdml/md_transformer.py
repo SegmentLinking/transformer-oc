@@ -79,6 +79,7 @@ GRADIENT_CLIP_NORM = 1.0
 
 def main() -> None:
     config = parse_args()
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     run_name = time.strftime("%Y_%m_%d_%H%M%S", time.gmtime())
     config["run_dir"] = os.path.join(config["output_dir"], run_name)
     # exist_ok=False: a second run started in the same second fails instead of mixing into this one
