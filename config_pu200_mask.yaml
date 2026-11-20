@@ -61,6 +61,10 @@ loss_weight_attractive: 1.0
 loss_weight_repulsive: 1.0
 loss_weight_beta: 1.0
 
+# Hit fraction in the OC loss instead of a real/fake cut (needs graphs with hit_{k}_simIdxs).
+# Every T3 with a matched hit belongs to its best sim track with weight f = matched hits / 6. false: sim_index targets.
+hit_fraction_loss: true
+
 output_dir: ./output
 save_every: 5
 resume: null
