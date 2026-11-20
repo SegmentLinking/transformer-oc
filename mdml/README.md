@@ -23,13 +23,16 @@ In progress: `md_transformer.py` is an outline, filled in one piece at a time. S
 2. A transformer predicts, per MD, whether it is fake and the kinematics of its sim: q/pT, η, cos φ, sin φ (φ relative to the patch centre).
 3. An MD attends to another only if their |Δη| and |Δφ| are within the window of their layer pair.
 4. Inference covers the event with a patch grid (patches with margin 0); each grid patch gets its margin and goes through the network.
-5. Decoding as for now: a fake cut, then DBSCAN on the predicted kinematics.
+5. Decoding as for now: a fake cut, then DBSCAN on the predicted kinematics (`cluster_space: kinematics`).
+6. Optional (`embed_dim > 0`): a learned per-MD embedding, trained with a contrastive loss to put MDs of one sim close; `cluster_space: embedding` runs DBSCAN on it instead. Off by default.
 
 Open: the layer-pair windows come from a quantile of same-sim MD pairs (`window_quantile`). They reflect the physics, so they should be stable across events and runs; once checked, replace `window_quantile` with the per-layer-pair η/φ windows themselves in the yaml (keep `window_scale`).
 
 Open: MDs with no sim have every sim feature at −999 in the `.pt` files. `MDInputs.from_mds` turns their sim kinematics into `nan`, so any accidental use shows up at once. Later (not now), `md_processing.py` could write `nan` for missing fields directly.
 
 Open: test `absolute_phi: true` once performance approaches T5. The network is φ-symmetric by default, but the detector is not, even in simulation: modules are rectangles assembled into a periodic mechanical structure. The effect may be negligible. Real data adds more φ asymmetry (dead channels, misalignment).
+
+Open: move away from DBSCAN soon, ideally to a decoder trained with the loss. DBSCAN on the embedding is especially awkward: the contrastive loss only compares MDs within one patch, so nothing ties the embeddings of different grid patches together, and unrelated tracks in distant patches can land close. The embedding stays in the code as a possibility, with `embed_dim: 0` by default. The long-term plan for MD ML includes a contrastive embedding.
 
 ## Pieces, bottom-up
 
