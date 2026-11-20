@@ -24,12 +24,10 @@ import time
 
 import numpy as np
 import torch
-from sklearn.cluster import DBSCAN
 from sklearn.neighbors import NearestNeighbors
 from torch import nn
 
-from harness.pmatched import matched_sim
-from harness.trackcands import NO_HIT, EventTrackCandidates
+from mdml.clustering import MIN_MDS, find_mdclusters
 from mdml.data import (
     MD_FEATURES,
     SIM_FEATURES,
@@ -37,6 +35,7 @@ from mdml.data import (
     event_paths,
     read_event,
 )
+from mdml.trackcands import TrackCandidatesFromOneEvent, trackcands_from_mdclusters
 
 # LST outer-tracker layers 1-6 (barrel) and 7-11 (endcap), one-hot encoded
 FIRST_LAYER = 1
@@ -59,10 +58,6 @@ SIM_KINEMATICS = ["sim_qoverpt", "sim_eta", "sim_cosphi", "sim_sinphi"]
 # The fake logit, then SIM_KINEMATICS
 N_TARGETS = 1 + len(SIM_KINEMATICS)
 N_HIDDEN = 64
-# DBSCAN's label for MDs in no cluster (noise); also given to MDs cut as fake
-NO_MDCLUSTER = -1
-# A track candidate needs at least this many MDs (DBSCAN min_samples)
-MIN_MDS = 3
 
 
 def main() -> None:
@@ -327,7 +322,7 @@ class SimpleMDNet:
         md_predProbFake = torch.sigmoid(md_predIsFakeLogit)
         return md_predProbFake.cpu().numpy(), md_predKinematics.cpu().numpy()
 
-    def trackcands(self, paths: list[str]) -> list[EventTrackCandidates]:
+    def trackcands(self, paths: list[str]) -> list[TrackCandidatesFromOneEvent]:
         """
         The track candidates of each event in paths, in the same order: predict, cut at self.fake_cut, cluster
         with self.eps (find_mdclusters), and build them (trackcands_from_mdclusters).
@@ -475,79 +470,6 @@ def loss_terms(
         md_simKinematics[md_simIsReal],
     )
     return loss_bce, loss_mse
-
-
-def find_mdclusters(
-    md_predKinematics: np.ndarray,
-    md_isKept: np.ndarray,
-    eps: float,
-) -> np.ndarray:
-    """
-    md_mdclusterIdx, shape (n_md,): each MD's MD cluster index from DBSCAN(eps, min_samples=MIN_MDS) on the kept
-    MDs' predicted kinematics, and NO_MDCLUSTER for noise and for MDs not kept.
-    """
-    md_mdclusterIdx = np.full(len(md_isKept), NO_MDCLUSTER)
-    if not np.any(md_isKept):
-        return md_mdclusterIdx
-    # DBSCAN labels noise -1, which is NO_MDCLUSTER
-    md_mdclusterIdx[md_isKept] = DBSCAN(
-        eps=eps,
-        min_samples=MIN_MDS,
-    ).fit_predict(md_predKinematics[md_isKept])
-    return md_mdclusterIdx
-
-
-def trackcands_from_mdclusters(
-    mds: MDsFromOneEvent,
-    md_mdclusterIdx: np.ndarray,
-    md_predProbFake: np.ndarray,
-    md_predKinematics: np.ndarray,
-) -> EventTrackCandidates:
-    """
-    One track candidate per MD cluster index >= 0, in increasing index:
-    - trackcand_hitIndices: the sorted unique hits of its MDs (md_hitIdx), padded with NO_HIT
-    - trackcand_simIdx: matched_sim (more than 75% of the unique hits) with a hit -> sims map built from its
-      MDs' md_inner_simIdxs and md_outer_simIdxs (padding < 0 dropped), < 0 for none. md_simIdx is not
-      enough: a hit can have several sims, and an MD with md_simIdx < 0 can have one hit of the matched sim.
-    - trackcand_score: mean of 1 - p(fake) over its MDs
-    - trackcand_pt: 1 / |mean predicted q/pT|; trackcand_eta: mean predicted eta;
-      trackcand_phi: atan2(mean predicted sin phi, mean predicted cos phi)
-    """
-    md_hitIdx = mds.md_hitIdx.numpy()
-    md_inner_simIdxs = mds.md_inner_simIdxs.numpy()
-    md_outer_simIdxs = mds.md_outer_simIdxs.numpy()
-    hit_lists, sims, scores, kinematics = [], [], [], []
-    for mdcluster in np.unique(md_mdclusterIdx[md_mdclusterIdx >= 0]):
-        md_indices = np.flatnonzero(md_mdclusterIdx == mdcluster)
-        # Only this MD cluster's hits; a hit shared by two of its MDs is one key, so it is counted once
-        hit_sims = {}
-        for md in md_indices:
-            inner_hit, outer_hit = md_hitIdx[md]
-            hit_sims[int(inner_hit)] = [
-                int(sim) for sim in md_inner_simIdxs[md] if sim >= 0
-            ]
-            hit_sims[int(outer_hit)] = [
-                int(sim) for sim in md_outer_simIdxs[md] if sim >= 0
-            ]
-        hits = sorted(hit_sims)
-        hit_lists.append(hits)
-        sims.append(matched_sim(hits=hits, hit_sims=hit_sims))
-        scores.append(np.mean(1 - md_predProbFake[md_indices]))
-        kinematics.append(md_predKinematics[md_indices].mean(axis=0))
-    n_hits_max = max((len(hits) for hits in hit_lists), default=0)
-    trackcand_hitIndices = np.full((len(hit_lists), n_hits_max), NO_HIT)
-    for trackcand, hits in enumerate(hit_lists):
-        trackcand_hitIndices[trackcand, : len(hits)] = hits
-    # Columns in SIM_KINEMATICS order: q/pT, eta, cos phi, sin phi
-    kinematics = np.array(kinematics).reshape(-1, len(SIM_KINEMATICS))
-    return EventTrackCandidates(
-        trackcand_hitIndices=trackcand_hitIndices,
-        trackcand_simIdx=np.array(sims, dtype=np.int64),
-        trackcand_score=np.array(scores),
-        trackcand_pt=1 / np.abs(kinematics[:, 0]),
-        trackcand_eta=kinematics[:, 1],
-        trackcand_phi=np.arctan2(kinematics[:, 3], kinematics[:, 2]),
-    )
 
 
 if __name__ == "__main__":

@@ -17,7 +17,15 @@ Input: the per-event `.pt` files of `transformer-datasets` `md_processing.py`, w
 
 ## How it works: MDTransformer
 
-1. In progress.
+In progress: `md_transformer.py` is an outline, filled in one piece at a time. Settings are in `md_transformer.yaml`.
+
+1. Training cuts random (η, φ) patches from each event. A patch has a margin around it: margin MDs are context for attention, but not in the loss or the predictions.
+2. A transformer predicts, per MD, whether it is fake and the kinematics of its sim: q/pT, η, cos φ, sin φ (φ relative to the patch centre).
+3. An MD attends to another only if their |Δη| and |Δφ| are within the window of their layer pair.
+4. Inference covers the event with a patch grid (patches with margin 0); each grid patch gets its margin and goes through the network.
+5. Decoding as for now: a fake cut, then DBSCAN on the predicted kinematics.
+
+Open: the layer-pair windows come from a quantile of same-sim MD pairs (`window_quantile`). They reflect the physics, so they should be stable across events and runs; once checked, replace `window_quantile` with the per-layer-pair η/φ windows themselves in the yaml (keep `window_scale`).
 
 ## Pieces, bottom-up
 
@@ -27,6 +35,9 @@ Each is one small module with its own test.
    directory (`train/` holds only training events, and so on).
 2. **`simple_mdnet.py`:** The `SimpleMDNet` class owns the MDNet and the working point (`fake_cut`, `eps`); it trains the MDNet, chooses the working point, and turns `.pt` files into one harness `EventTrackCandidates` per event, with every field filled. Running the module is the end-to-end command: train, then choose the working point, into one run directory.
 3. **Harness:** `--trackcands simple_mdnet` in `harness/performance.py`, calling `SimpleMDNet.trackcands`.
+4. **`clustering.py`:** `find_mdclusters` (DBSCAN with `min_samples=MIN_MDS`), shared by the MD networks.
+5. **`trackcands.py`:** `TrackCandidatesFromOneEvent` (a copy of the harness's `EventTrackCandidates`; how to de-duplicate them is open) and `trackcands_from_mdclusters`, shared by the MD networks.
+6. **`md_transformer.py`:** `MDTransformerNet` (the algorithm and working point), `MDTransformerLightningModule` (training) and `MDTransformerModule` (the network). Independent of `simple_mdnet.py`.
 
 ## Decisions
 
@@ -39,6 +50,9 @@ Each is one small module with its own test.
 | 2026-11-17 | The tracking algorithm is the whole chain, not the training alone: train, choose the working point (`--fake-cut`, `--eps`), infer, evaluate. Each step is its own script and is developed and checked on its own, but the goal is one command that relaunches every step into one run directory (`output/mdml/run_<date>/`: checkpoints, track candidates, performance). Lesson from the T3 model, where the steps after training (DBSCAN eps, β cut) were separate and easy to forget. |
 | 2026-11-17 | One class, `SimpleMDNet`, is the whole algorithm: it owns the MDNet and the working point, and returns track candidates in memory instead of writing them to disk. A saved `simple_mdnet.pt` holds the weights and the working point together. Track candidates get `trackcand_simIdx` from the `.pt` file's per-hit sims (`md_inner_simIdxs`, `md_outer_simIdxs`), which cover only hits in MDs and so are complete for these track candidates. Replaces the separate `model.py`, `train.py` and `infer.py`. |
 | 2026-11-17 | Training runs on the GPU by default (`--device`), and stays device-agnostic so it also runs on CPU. |
+| 2026-11-19 | The MD networks are independent: they never import from or mention each other. Code they share lives in `clustering.py` and `trackcands.py`. |
+| 2026-11-19 | MDTransformer vocabulary: a *patch* is any (η, φ) subset of an event; its *margin* is context around it. Inference uses a *patch grid*: patches with margin 0 that cover the event. |
+| 2026-11-19 | MDTransformer settings, including the run's paths, live in one config yaml (`--config` is the only argument); Lightning saves the hyperparameters as `hparams.yaml`. |
 
 ## Running
 

@@ -1,0 +1,58 @@
+# MDTransformerNet config (mdml/md_transformer.py). Defaults are the best scratch run so far.
+# Copy this file per run and change at least "output", which must be a new directory.
+
+# ---- run paths
+train_dir: ../transformer-datasets/samples/ttbar/train
+val_dir: ../transformer-datasets/samples/ttbar/val
+output: output/mdml/md_transformer/run_YYYY_MM_DD_HHMMSS
+
+# ---- events
+n_train_events: 3000
+# The last n_val_events of val_dir: validation loss, working point and [md_quality]. The harness evaluates the
+# first validation file, so these must not reach into it
+n_val_events: 50
+# MDs of sims below this pT (GeV) count as fake
+pt_min: 0.8
+
+# ---- patches (all half-widths; eta, and phi in rad)
+patches_per_event: 8
+patch_eta: 0.25
+patch_phi: 0.5
+# Context around the patch: seen by attention, not in the loss or predictions
+margin_eta: 0.25
+margin_phi: 0.5
+
+# ---- network
+n_blocks: 4
+hidden: 64
+n_heads: 4
+dropout: 0.0
+# false: phi only relative to the patch centre (phi-symmetric network); true: also each MD's absolute phi
+absolute_phi: false
+
+# ---- attention windows per layer pair (layer_pair_windows)
+# Quantile of |deta| and |dphi| of same-sim MD pairs; larger is looser
+window_quantile: 0.9
+# Multiplies every window; > 1 relaxes them (e.g. on a larger GPU)
+window_scale: 1.0
+# Training events the windows are measured on
+window_n_events: 20
+
+# ---- training
+epochs: 3
+lr: 0.001
+weight_decay: 0.01
+mse_weight: 1.0
+seed: 42
+device: cuda
+precision: 32
+num_workers: 8
+log_every: 200
+
+# ---- inference and working point
+# Patches (from the patch grid, with their margin) per forward pass
+patches_per_batch: 4
+# fake_cut keeps this fraction of real MDs
+fake_keep: 0.8
+# eps: this quantile of each kept real MD's distance to its (MIN_MDS - 1)-th nearest same-sim neighbour
+eps_quantile: 0.5
