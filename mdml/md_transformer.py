@@ -36,6 +36,7 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 import yaml
+from sklearn.neighbors import NearestNeighbors
 from torch import nn
 
 from mdml.clustering import MIN_MDS, find_mdclusters
@@ -513,7 +514,19 @@ class MDTransformerNet:
 
     def choose_fake_cut(self, paths: list[str]) -> None:
         """Set self.fake_cut to quantile fake_keep of the real MDs' p(fake). Logs a [fake_cut] line."""
-        raise NotImplementedError()
+        real_probs = []
+        for path in paths:
+            mds = read_event(path=path)
+            md_predProbFake, _, _ = self.predict(mds=mds)
+            mdi = MDInputs.from_mds(mds=mds, pt_min=self.config["pt_min"])
+            real_probs.append(md_predProbFake[~mdi.md_simIsFake.numpy()])
+        real_probs = np.concatenate(real_probs)
+        self.fake_cut = float(np.quantile(real_probs, self.config["fake_keep"]))
+        print(
+            f"[fake_cut] fake_cut={self.fake_cut:.4f} fake_keep={self.config['fake_keep']} "
+            f"n_events={len(paths)} n_real_mds={len(real_probs)}",
+            flush=True,
+        )
 
     def choose_eps(self, paths: list[str]) -> None:
         """
@@ -522,7 +535,42 @@ class MDTransformerNet:
         so at this eps that fraction of the kept real MDs could be core points from their own sim alone. Logs an
         [eps] line.
         """
-        raise NotImplementedError()
+        distances = []
+        for path in paths:
+            mds = read_event(path=path)
+            md_predProbFake, md_predKinematics, md_predEmbedding = self.predict(mds=mds)
+            md_coordinates = (
+                md_predKinematics
+                if self.config["cluster_space"] == "kinematics"
+                else md_predEmbedding
+            )
+            mdi = MDInputs.from_mds(mds=mds, pt_min=self.config["pt_min"])
+            md_isKeptReal = (
+                md_predProbFake < self.fake_cut
+            ) & ~mdi.md_simIsFake.numpy()
+            kept_simIdx = mdi.md_simIdx.numpy()[md_isKeptReal]
+            kept_coordinates = md_coordinates[md_isKeptReal]
+            for sim in np.unique(kept_simIdx):
+                sim_coordinates = kept_coordinates[kept_simIdx == sim]
+                if len(sim_coordinates) < MIN_MDS:
+                    # Too few kept MDs for any of them to be a core point from this sim alone
+                    distances.extend([np.inf] * len(sim_coordinates))
+                    continue
+                # The nearest neighbour of each MD is itself, at distance 0
+                dist, _ = (
+                    NearestNeighbors(n_neighbors=MIN_MDS)
+                    .fit(sim_coordinates)
+                    .kneighbors(sim_coordinates)
+                )
+                distances.extend(dist[:, MIN_MDS - 1])
+        self.eps = float(np.quantile(distances, self.config["eps_quantile"]))
+        n_too_few = int(np.isinf(distances).sum())
+        print(
+            f"[eps] eps={self.eps:.4f} eps_quantile={self.config['eps_quantile']} "
+            f"cluster_space={self.config['cluster_space']} n_events={len(paths)} "
+            f"n_kept_real_mds={len(distances)} n_in_sims_with_too_few={n_too_few}",
+            flush=True,
+        )
 
     def trackcands(self, paths: list[str]) -> list[TrackCandidatesFromOneEvent]:
         """
