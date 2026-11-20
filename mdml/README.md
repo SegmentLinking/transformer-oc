@@ -34,6 +34,10 @@ Open: test `absolute_phi: true` once performance approaches T5. The network is �
 
 Open: move away from DBSCAN soon, ideally to a decoder trained with the loss. DBSCAN on the embedding is especially awkward: the contrastive loss only compares MDs within one patch, so nothing ties the embeddings of different grid patches together, and unrelated tracks in distant patches can land close. The embedding stays in the code as a possibility, with `embed_dim: 0` by default. The long-term plan for MD ML includes a contrastive embedding.
 
+Open (soon, not now): `MDTransformerNet.predict` and `MDTransformerModule.forward` return a 3-tuple (p(fake) or its logit, kinematics, embedding). That is trending toward a small dataclass of per-MD predictions.
+
+Todo: make the choice of training patch centres configurable: a random MD (now), or uniform in η/φ. Random MDs put more patches in dense regions. The inference patch grid is uniform, so uniform centres would match inference more closely.
+
 ## Pieces, bottom-up
 
 Each is one small module with its own test.
