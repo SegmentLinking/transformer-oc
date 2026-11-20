@@ -1,0 +1,83 @@
+# transformer-datasets output (see its README): {train,val,test}/LSTNtuple_<name>.root.entry_<N>.pt.
+# val: training loss and early stopping; test: reported numbers.
+# Neither /ceph/cms nor /ceph/cms_ech (where /ceph/cms/store/user/jachisma points) is mounted in the
+# apptainer image by default: run it with -B /ceph/cms,/ceph/cms_ech.
+train_data_dir: /ceph/cms/store/user/jachisma/transformer-oc/output_pu200_t3_hits_v2/train
+val_data_dir: /ceph/cms/store/user/jachisma/transformer-oc/output_pu200_t3_hits_v2/val
+test_data_dir: /ceph/cms/store/user/jachisma/transformer-oc/output_pu200_t3_hits_v2/test
+
+# Feature normalization (per-feature min/max, pT log-transformed), saved to <run dir>/normalization.json.
+# normalization_file: precomputed over all training files, made with
+#   python3 src/normalization.py --data-dir <train_data_dir> --output <file>
+# Set it to null to compute at the start of training from normalization_n_files training files instead.
+normalization_n_files: 20
+normalization_file: /ceph/cms/store/user/jachisma/transformer-oc/output_pu200_t3_hits_v2/normalization_train.json
+
+train_subset: null
+val_subset: null
+
+debug: true
+
+model: transformer
+
+hidden_dim: 256
+num_layers: 6      
+nhead: 8        
+latent_dim: 128     
+dropout: 0.1
+dr_threshold: 0.4
+max_neighbors: 64
+normalize_embeddings: true
+
+# eta/phi mask on T3s
+# half_width=null -> no cut in that coordinate (center must then be 0)
+# center=null -> random center for every event
+eta_mask_half_width: 0.5
+phi_mask_half_width: 0.5
+eta_mask_center: null
+phi_mask_center: null
+
+learning_rate: 0.0001  
+weight_decay: 0.0001   
+epochs: 100
+num_workers: 4
+
+scheduler_gamma: 0.5
+scheduler_milestones: [100, 200]
+
+early_stopping_patience: 15
+
+gradient_clip_val: 1.0
+gradient_clip_algorithm: norm
+accumulate_grad_batches: 4
+check_val_every_n_epoch: 5
+precision: 16
+
+oc_q_min: 0.1
+oc_s_B: 1.0
+oc_repulsive_chunk_size: 16
+
+loss_weight_attractive: 1.0
+loss_weight_repulsive: 1.0
+loss_weight_beta: 1.0
+
+output_dir: ./output
+save_every: 5
+resume: null
+
+seed: 42
+num_cpu_threads: 8  # torch CPU threads in the main process; a GPU run needs few
+gpus: [1]
+
+dbscan_min_samples: 2
+beta_threshold: 0.005
+
+purity_threshold: 0.75
+eta_cut: null
+
+pt_bins_start: 0.8
+pt_bins_end: 2.0
+pt_bins_count: 50
+eta_bins_start: -2.4
+eta_bins_end: 2.4
+eta_bins_count: 50

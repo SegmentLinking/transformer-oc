@@ -275,6 +275,11 @@ def main():
     else:
         raise ValueError("A configuration file must be provided with --config")
     set_seed(config['seed'])
+    # Threads for torch's CPU ops in this process (DataLoader workers use 1 each regardless).
+    # Unset: torch's default of one per physical core, which counts against per-user thread limits.
+    if config.get('num_cpu_threads'):
+        torch.set_num_threads(config['num_cpu_threads'])
+        print(f"torch CPU threads: {torch.get_num_threads()}")
     os.makedirs(config['output_dir'], exist_ok=True)
     trainer = Trainer(config)
     trainer.train()
