@@ -40,6 +40,10 @@ Open (worth studying): same-layer, same-sim MD pairs are many, and their |Δη| 
 
 Todo: make the choice of training patch centres configurable: a random MD (now), or drawn at random from a uniform distribution in η (|η| ≤ 2.8) and φ. Random MDs put more patches in dense regions. The inference patch grid is not random (evenly spaced centres), but it gives every η/φ region one patch, so on average uniformly drawn centres would cover the detector the way inference does.
 
+Todo (2026-11-20, once the harness and the first-pass MDTransformer are stable): rename SimpleMDNet to MDMLP, which is more descriptive and shorter. This covers the class, `simple_mdnet.py`, `--trackcands simple_mdnet` and the saved `simple_mdnet.pt`.
+
+Todo: speed up `MDTransformerNet.predict`, about 2 s of the harness's 2.2 s per event on the V100 (run_2026_11_19_224953, first validation file). About 1.3 s of it is building the 84 grid patches on the CPU, each scanning all ~50k MDs of the event; the forward pass is 0.45–0.8 s. Ideas: sort MDs into grid cells once, build patches on the GPU, a larger `patches_per_batch`.
+
 ## Pieces, bottom-up
 
 Each is one small module with its own test.
@@ -47,7 +51,7 @@ Each is one small module with its own test.
 1. **`data.py`:** a `MDsFromOneEvent` dataclass read from one `.pt` file, and the `.pt` paths of a dataset's
    directory (`train/` holds only training events, and so on).
 2. **`simple_mdnet.py`:** The `SimpleMDNet` class owns the MDNet and the working point (`fake_cut`, `eps`); it trains the MDNet, chooses the working point, and turns `.pt` files into one harness `EventTrackCandidates` per event, with every field filled. Running the module is the end-to-end command: train, then choose the working point, into one run directory.
-3. **Harness:** `--trackcands simple_mdnet` in `harness/performance.py`, calling `SimpleMDNet.trackcands`.
+3. **Harness:** `--trackcands simple_mdnet` or `md_transformer` in `harness/performance.py`, with `--model` the saved network; it calls the network's `trackcands`.
 4. **`clustering.py`:** `find_mdclusters` (DBSCAN with `min_samples=MIN_MDS`), shared by the MD networks.
 5. **`trackcands.py`:** `TrackCandidatesFromOneEvent` (a copy of the harness's `EventTrackCandidates`; how to de-duplicate them is open) and `trackcands_from_mdclusters`, shared by the MD networks.
 6. **`md_transformer.py`:** `MDTransformerNet` (the algorithm and working point), `MDTransformerLightningModule` (training) and `MDTransformerModule` (the network). Independent of `simple_mdnet.py`.
