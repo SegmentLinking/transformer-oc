@@ -70,6 +70,8 @@ SIM_KINEMATICS = ["sim_qoverpt", "sim_eta", "sim_cosphi", "sim_sinphi"]
 MD_ETA_MAX = 2.8
 # Layer pairs with fewer same-sim MD pairs get a zero-width window (no attention between them)
 MIN_WINDOW_PAIRS = 50
+# Gradients are rescaled so their total norm is at most this
+GRADIENT_CLIP_NORM = 1.0
 
 
 def main() -> None:
@@ -606,16 +608,66 @@ def contrastive_loss(
     contrastive_margin: float,
 ) -> torch.Tensor:
     """
-    Per patch, anchors are the real MDs outside the margin, and every other valid MD (margin included) is a
-    positive (real, same sim) or a negative. Loss: mean d^2 over positives plus mean relu(contrastive_margin - d)^2
-    over negatives, with d the embedding distance, averaged over patches with at least one anchor.
+    Per patch, the reference MDs are the real MDs outside the margin. For each, every other valid MD (margin
+    included) is a positive (real, same sim) or a negative. Loss: mean d^2 over positives plus mean relu(contrastive_margin - d)^2
+    over negatives, with d the embedding distance, averaged over patches with at least one reference MD.
+    Fake MDs (no sim, or a sim below pt_min) are negatives of every reference MD.
     """
-    raise NotImplementedError()
+    terms = []
+    for patch in range(md_embedding.shape[0]):
+        md_isValid = batch.md_isValid[patch]
+        md_isReal = md_isValid & ~batch.md_simIsFake[patch]
+        reference_mds = torch.nonzero(md_isReal & ~batch.md_isMargin[patch]).squeeze(1)
+        if len(reference_mds) == 0:
+            continue
+        other_mds = torch.nonzero(md_isValid).squeeze(1)
+        # (n_reference_mds, n_other_mds)
+        dist = torch.cdist(
+            md_embedding[patch, reference_mds],
+            md_embedding[patch, other_mds],
+        )
+        md_simIdx = batch.md_simIdx[patch]
+        not_self = reference_mds[:, None] != other_mds[None, :]
+        is_positive = (
+            (md_simIdx[reference_mds][:, None] == md_simIdx[other_mds][None, :])
+            & md_isReal[other_mds][None, :]
+            & not_self
+        )
+        is_negative = ~is_positive & not_self
+        # A patch can have reference MDs but no positives (each real sim with a single MD)
+        loss_positive = (
+            (dist[is_positive] ** 2).mean() if is_positive.any() else dist.new_zeros(())
+        )
+        loss_negative = (
+            nn.functional.relu(contrastive_margin - dist[is_negative]) ** 2
+        ).mean()
+        terms.append(loss_positive + loss_negative)
+    return torch.stack(terms).mean()
 
 
 def make_trainer(config: dict) -> pl.Trainer:
     """No progress bar (plain [train]/[val] lines), CSVLogger and checkpoints in the run directory."""
-    raise NotImplementedError()
+    return pl.Trainer(
+        max_epochs=config["epochs"],
+        accelerator="gpu" if config["device"] == "cuda" else "cpu",
+        devices=1,
+        precision=config["precision"],
+        gradient_clip_val=GRADIENT_CLIP_NORM,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        # hparams.yaml and metrics.csv directly in the run directory (no name/version subdirectories)
+        logger=pl.loggers.CSVLogger(save_dir=config["output"], name="", version=""),
+        log_every_n_steps=config["log_every"],
+        callbacks=[
+            # The epoch with the lowest val_loss, plus last.ckpt
+            pl.callbacks.ModelCheckpoint(
+                dirpath=config["output"],
+                monitor="val_loss",
+                save_last=True,
+            )
+        ],
+        num_sanity_val_steps=0,
+    )
 
 
 # ---------------------------------------------------------------- network
