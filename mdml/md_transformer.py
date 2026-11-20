@@ -277,7 +277,29 @@ class PatchBatch:
 
 
 def collate_patches(patches: list[Patch]) -> PatchBatch:
-    raise NotImplementedError()
+    """
+    Pad each field to the largest patch. Padding is 0 or False, except md_simKinematics: nan, like MDs with no
+    sim. md_inputs and md_pos must stay finite, since padded MDs still go through the network.
+    """
+
+    def pad(tensors: list[torch.Tensor], value: float) -> torch.Tensor:
+        return nn.utils.rnn.pad_sequence(tensors, batch_first=True, padding_value=value)
+
+    return PatchBatch(
+        md_inputs=pad([pat.md_inputs for pat in patches], value=0),
+        md_layer=pad([pat.md_layer for pat in patches], value=0),
+        md_pos=pad([pat.md_pos for pat in patches], value=0),
+        md_isValid=pad(
+            [torch.ones(len(pat.md_idx), dtype=torch.bool) for pat in patches],
+            value=False,
+        ),
+        md_isMargin=pad([pat.md_isMargin for pat in patches], value=False),
+        md_simIsFake=pad([pat.md_simIsFake for pat in patches], value=False),
+        md_simKinematics=pad(
+            [pat.md_simKinematics for pat in patches],
+            value=torch.nan,
+        ),
+    )
 
 
 class PatchDataset(torch.utils.data.Dataset):
