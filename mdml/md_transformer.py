@@ -84,6 +84,7 @@ def main() -> None:
     # exist_ok=False: a second run started in the same second fails instead of mixing into this one
     os.makedirs(config["run_dir"], exist_ok=False)
     print(f"[run] run_dir={config['run_dir']}")
+    torch.set_num_threads(config["cpu_threads"])
     pl.seed_everything(config["seed"])
     train_paths = event_paths(pt_dir=config["train_dir"])[: config["n_train_events"]]
     # The last validation events: the harness evaluates the first validation file
@@ -137,7 +138,12 @@ class LayerPairWindows:
         """
         # One row per same-sim MD pair: (lower layer, higher layer) and (|deta|, |dphi|)
         pair_layers, pair_absDeltas = [], []
-        for path in paths:
+        start = time.time()
+        for idx, path in enumerate(paths):
+            print(
+                f"[windows] event={idx + 1} n_events={len(paths)} seconds={time.time() - start:.0f}",
+                flush=True,
+            )
             mdi = MDInputs.from_mds(mds=read_event(path=path), pt_min=config["pt_min"])
             md_isReal = ~mdi.md_simIsFake
             for sim in mdi.md_simIdx[md_isReal].unique().tolist():
@@ -461,6 +467,7 @@ class MDTransformerNet:
                 train=False,
             ),
         )
+        self.module.to(self.config["device"])
 
     def predict(
         self,
@@ -536,7 +543,12 @@ class MDTransformerNet:
     def choose_fake_cut(self, paths: list[str]) -> None:
         """Set self.fake_cut to quantile fake_keep of the real MDs' p(fake). Logs a [fake_cut] line."""
         real_probs = []
-        for path in paths:
+        start = time.time()
+        for idx, path in enumerate(paths):
+            print(
+                f"[fake_cut] event={idx + 1} n_events={len(paths)} seconds={time.time() - start:.0f}",
+                flush=True,
+            )
             mds = read_event(path=path)
             md_predProbFake, _, _ = self.predict(mds=mds)
             mdi = MDInputs.from_mds(mds=mds, pt_min=self.config["pt_min"])
@@ -557,7 +569,12 @@ class MDTransformerNet:
         [eps] line.
         """
         distances = []
-        for path in paths:
+        start = time.time()
+        for idx, path in enumerate(paths):
+            print(
+                f"[eps] event={idx + 1} n_events={len(paths)} seconds={time.time() - start:.0f}",
+                flush=True,
+            )
             mds = read_event(path=path)
             md_predProbFake, md_predKinematics, md_predEmbedding = self.predict(mds=mds)
             md_coordinates = self.cluster_coordinates(
@@ -1087,7 +1104,12 @@ def log_md_quality(algo: MDTransformerNet, paths: list[str]) -> None:
     and the IQR of the q/pT, eta and phi residuals of real MDs.
     """
     probs, is_fake, kinematics, sim_kinematics = [], [], [], []
-    for path in paths:
+    start = time.time()
+    for idx, path in enumerate(paths):
+        print(
+            f"[md_quality] event={idx + 1} n_events={len(paths)} seconds={time.time() - start:.0f}",
+            flush=True,
+        )
         mds = read_event(path=path)
         md_predProbFake, md_predKinematics, _ = algo.predict(mds=mds)
         mdi = MDInputs.from_mds(mds=mds, pt_min=algo.config["pt_min"])

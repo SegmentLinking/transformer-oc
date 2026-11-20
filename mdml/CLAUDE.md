@@ -10,4 +10,5 @@ Rules and guidelines for MDML.
 
 ## Guidelines
 
-- If a piece of code is expected to take more than one minute to run, include an announcement that this piece of code is starting. For example, `print(f"[windows] path={path}")` indicates a new filepath will be opened to calculate windows, and this could be a computationally expensive process. Without an announcement, Alex might think the code is hanging.
+- Each step of a script’s `main` that loops over events or could take more than a few seconds prints a `[tag] key=value` line when it starts. Print the current time if there is not a meaningful `key=value` to print. Speed differs between machines (a step that takes seconds on phi3 took 15 minutes on NRP), so a silent step looks like a hang.
+
