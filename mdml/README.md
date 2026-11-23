@@ -43,6 +43,9 @@ Todo: make the choice of training patch centres configurable: a random MD (now),
 Todo (2026-11-20, once the harness and the first-pass MDTransformer are stable): rename SimpleMDNet to MDMLP, which is more descriptive and shorter. This covers the class, `simple_mdnet.py`, `--trackcands simple_mdnet` and the saved `simple_mdnet.pt`.
 
 Todo (2026-11-22): test how well the network regresses each MD's sim track production vertex, `sim_vtxperp` and `sim_vz`. One MD alone should resolve them poorly (the 2S strips have little z information), but attention across the patch may do better than expected. Measure the resolution (IQR, as in `[md_quality]`) before deciding whether vertex outputs help the decoder.
+Implemented 2026-11-23 in `md_transformer.py`: targets asinh(sim_vz / 5 cm) and log1p(sim_vtxperp / 1 cm), MSE
+weighted by `sim_vz_weight` and `sim_vtxperp_weight` (default 0.0), `[md_quality]` keys `vz_res_iqr` and
+`vtxperp_res_iqr` in cm; not in `cluster_space`. Still to do: a training run with the weights > 0.
 
 Todo: speed up `MDTransformerNet.predict`, about 2 s of the harness's 2.2 s per event on the V100 (run_2026_11_19_224953, first validation file). About 1.3 s of it is building the 84 grid patches on the CPU, each scanning all ~50k MDs of the event; the forward pass is 0.45–0.8 s. Ideas: sort MDs into grid cells once, build patches on the GPU, a larger `patches_per_batch`.
 

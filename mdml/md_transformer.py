@@ -2,7 +2,8 @@
 MDTransformerNet: a tracking algorithm from outer-tracker MDs to track candidates.
 
 A transformer (MDTransformerModule) sees the MDs of one (eta, phi) patch at a time and predicts, for each MD,
-whether it is fake and the kinematics of its sim, SIM_KINEMATICS = (q/pT, eta, cos phi, sin phi). Optionally
+whether it is fake and the kinematics of its sim, SIM_KINEMATICS = (q/pT, eta, cos phi, sin phi), and its sim's
+production vertex (sim_vz, sim_vtxperp; trained only if sim_vz_weight, sim_vtxperp_weight > 0). Optionally
 (embed_dim > 0) it also predicts a learned embedding, trained with a contrastive loss to put MDs of one sim close.
 
 - Patches: a patch is the MDs within half-widths (patch_eta, patch_phi) of a centre. Around it, a margin of
@@ -69,6 +70,13 @@ N_INPUTS = N_LAYERS + len(FEATURE_SCALES) + 2
 # absolute_phi: + each MD's absolute (cos phi, sin phi)
 N_ABSOLUTE_PHI_INPUTS = 2
 SIM_KINEMATICS = ["sim_qoverpt", "sim_eta", "sim_cosphi", "sim_sinphi"]
+# Production vertex of each MD's sim, regressed as asinh(sim_vz / scale) and log1p(sim_vtxperp / scale): linear
+# within about one scale (the luminous region, ~5 cm in z), logarithmic in the tails of secondaries (to ~2 m).
+# asinh keeps the sign of sim_vz. Not in cluster_space: the resolution is unknown
+SIM_VZ_SCALE = 5.0  # cm
+SIM_VTXPERP_SCALE = 1.0  # cm
+# One per vertex output: (asinh(sim_vz / SIM_VZ_SCALE), log1p(sim_vtxperp / SIM_VTXPERP_SCALE))
+SIM_VERTEX_SCALES = [SIM_VZ_SCALE, SIM_VTXPERP_SCALE]
 # The patch grid covers |eta| <= MD_ETA_MAX; the largest |md eta| seen is 2.78
 MD_ETA_MAX = 2.8
 # Layer pairs with fewer same-sim MD pairs get a zero-width window (no attention between them)
@@ -233,6 +241,8 @@ class MDInputs:
     md_simIsFake: torch.Tensor  # no sim, or sim pT < pt_min
     # (n_md, 3): sim q/pT, eta, phi; nan where md_simIdx < 0
     md_simKinematics: torch.Tensor
+    # (n_md, 2): asinh(sim_vz / SIM_VZ_SCALE), log1p(sim_vtxperp / SIM_VTXPERP_SCALE); nan where md_simIdx < 0
+    md_simVertex: torch.Tensor
 
     @classmethod
     def from_mds(cls, mds: MDsFromOneEvent, pt_min: float) -> "MDInputs":
@@ -253,8 +263,21 @@ class MDInputs:
             ],
             dim=1,
         )
+        md_simVertex = torch.stack(
+            [
+                torch.asinh(
+                    md_simFeatures[:, SIM_FEATURES.index("sim_vz")] / SIM_VZ_SCALE
+                ),
+                torch.log1p(
+                    md_simFeatures[:, SIM_FEATURES.index("sim_vtxperp")]
+                    / SIM_VTXPERP_SCALE
+                ),
+            ],
+            dim=1,
+        )
         # The .pt files fill every sim feature with -999 when there is no sim; nan makes any use of them obvious
         md_simKinematics[mds.md_simIdx < 0] = torch.nan
+        md_simVertex[mds.md_simIdx < 0] = torch.nan
         return cls(
             md_inputs=torch.cat(
                 [
@@ -272,6 +295,7 @@ class MDInputs:
             md_simIdx=mds.md_simIdx,
             md_simIsFake=(mds.md_simIdx < 0) | (md_simPt < pt_min),
             md_simKinematics=md_simKinematics,
+            md_simVertex=md_simVertex,
         )
 
 
@@ -289,6 +313,7 @@ class Patch:
     md_simIsFake: torch.Tensor
     md_simIdx: torch.Tensor
     md_simKinematics: torch.Tensor  # (n, 4): SIM_KINEMATICS, phi relative to the centre
+    md_simVertex: torch.Tensor  # (n, 2): as MDInputs.md_simVertex
 
     @classmethod
     def from_mdinputs(
@@ -340,6 +365,7 @@ class Patch:
                 ],
                 dim=1,
             ),
+            md_simVertex=mdi.md_simVertex[md_idx],
         )
 
 
@@ -362,12 +388,13 @@ class PatchBatch:
     md_simIsFake: torch.Tensor
     md_simIdx: torch.Tensor
     md_simKinematics: torch.Tensor
+    md_simVertex: torch.Tensor
 
 
 def collate_patches(patches: list[Patch]) -> PatchBatch:
     """
     Pad each field to the largest patch. Padding is 0 or False, except md_simIdx: -1 (no sim) and
-    md_simKinematics: nan, like MDs with no sim. md_inputs and md_pos must stay finite, since padded MDs still go
+    md_simKinematics, md_simVertex: nan, like MDs with no sim. md_inputs and md_pos must stay finite, since padded MDs still go
     through the network.
     """
 
@@ -387,6 +414,10 @@ def collate_patches(patches: list[Patch]) -> PatchBatch:
         md_simIdx=pad([pat.md_simIdx for pat in patches], value=-1),
         md_simKinematics=pad(
             [pat.md_simKinematics for pat in patches],
+            value=torch.nan,
+        ),
+        md_simVertex=pad(
+            [pat.md_simVertex for pat in patches],
             value=torch.nan,
         ),
     )
@@ -450,6 +481,18 @@ def make_loader(
 # ---------------------------------------------------------------- algorithm
 
 
+@dataclass
+class MDPredictions:
+    """One event's network outputs (MDTransformerNet.predict); entry i of every field belongs to MD i."""
+
+    md_predProbFake: np.ndarray  # (n_md,)
+    # (n_md, 4): q/pT, eta, cos phi, sin phi, with absolute phi
+    md_predKinematics: np.ndarray
+    # (n_md, 2): sim_vz, sim_vtxperp in cm, back from the regressed asinh and log1p
+    md_predVertex: np.ndarray
+    md_predEmbedding: np.ndarray  # (n_md, embed_dim)
+
+
 class MDTransformerNet:
     """
     The whole algorithm: an MDTransformerModule plus the working point that turns its output into track
@@ -489,10 +532,9 @@ class MDTransformerNet:
     def predict(
         self,
         mds: MDsFromOneEvent,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> MDPredictions:
         """
-        md_predProbFake (n_md,), md_predKinematics (n_md, 4: q/pT, eta, cos phi, sin phi with absolute phi) and
-        md_predEmbedding (n_md, embed_dim) for every MD. The patch grid (patch_grid) covers the event; each grid
+        The MDPredictions of every MD in mds. The patch grid (patch_grid) covers the event; each grid
         patch gets its margin, and patches_per_batch of them go through the network at a time. Each MD takes the
         prediction of the grid patch that holds it.
         """
@@ -512,6 +554,7 @@ class MDTransformerNet:
         n_md = len(mdi.md_eta)
         md_predProbFake = torch.full((n_md,), torch.nan)
         md_predKinematics = torch.full((n_md, len(SIM_KINEMATICS)), torch.nan)
+        md_predVertex = torch.full((n_md, len(SIM_VERTEX_SCALES)), torch.nan)
         md_predEmbedding = torch.full((n_md, self.config["embed_dim"]), torch.nan)
         grid = [(row, col) for row in range(n_eta) for col in range(n_phi)]
         for start in range(0, len(grid), self.config["patches_per_batch"]):
@@ -531,7 +574,7 @@ class MDTransformerNet:
                 **{name: val.to(device) for name, val in vars(batch).items()}
             )
             with torch.no_grad():
-                logits, kinematics, embeddings = self.module(batch=batch)
+                logits, kinematics, vertex, embeddings = self.module(batch=batch)
             for idx, ((row, col), phi_centre, pat) in enumerate(
                 zip(cells, phi_centres, patches)
             ):
@@ -550,11 +593,20 @@ class MDTransformerNet:
                     [relative[:, 0], relative[:, 1], torch.cos(phi), torch.sin(phi)],
                     dim=1,
                 )
+                transformed = vertex[idx, :n_pat][is_in_cell].cpu()
+                md_predVertex[md_idx] = torch.stack(
+                    [
+                        SIM_VZ_SCALE * torch.sinh(transformed[:, 0]),
+                        SIM_VTXPERP_SCALE * torch.expm1(transformed[:, 1]),
+                    ],
+                    dim=1,
+                )
                 md_predEmbedding[md_idx] = embeddings[idx, :n_pat][is_in_cell].cpu()
-        return (
-            md_predProbFake.numpy(),
-            md_predKinematics.numpy(),
-            md_predEmbedding.numpy(),
+        return MDPredictions(
+            md_predProbFake=md_predProbFake.numpy(),
+            md_predKinematics=md_predKinematics.numpy(),
+            md_predVertex=md_predVertex.numpy(),
+            md_predEmbedding=md_predEmbedding.numpy(),
         )
 
     def choose_fake_cut(self, paths: list[str]) -> None:
@@ -567,9 +619,9 @@ class MDTransformerNet:
                 config=self.config,
             )
             mds = read_event(path=path)
-            md_predProbFake, _, _ = self.predict(mds=mds)
+            pred = self.predict(mds=mds)
             mdi = MDInputs.from_mds(mds=mds, pt_min=self.config["pt_min"])
-            real_probs.append(md_predProbFake[~mdi.md_simIsFake.numpy()])
+            real_probs.append(pred.md_predProbFake[~mdi.md_simIsFake.numpy()])
         real_probs = np.concatenate(real_probs)
         self.fake_cut = float(np.quantile(real_probs, self.config["fake_keep"]))
         print_and_log(
@@ -595,14 +647,11 @@ class MDTransformerNet:
                 config=self.config,
             )
             mds = read_event(path=path)
-            md_predProbFake, md_predKinematics, md_predEmbedding = self.predict(mds=mds)
-            md_coordinates = self.cluster_coordinates(
-                md_predKinematics=md_predKinematics,
-                md_predEmbedding=md_predEmbedding,
-            )
+            pred = self.predict(mds=mds)
+            md_coordinates = self.cluster_coordinates(pred=pred)
             mdi = MDInputs.from_mds(mds=mds, pt_min=self.config["pt_min"])
             md_isKeptReal = (
-                md_predProbFake < self.fake_cut
+                pred.md_predProbFake < self.fake_cut
             ) & ~mdi.md_simIsFake.numpy()
             kept_simIdx = mdi.md_simIdx.numpy()[md_isKeptReal]
             kept_coordinates = md_coordinates[md_isKeptReal]
@@ -638,34 +687,27 @@ class MDTransformerNet:
         event_trackcands = []
         for path in paths:
             mds = read_event(path=path)
-            md_predProbFake, md_predKinematics, md_predEmbedding = self.predict(mds=mds)
+            pred = self.predict(mds=mds)
             md_mdclusterIdx = find_mdclusters(
-                md_coordinates=self.cluster_coordinates(
-                    md_predKinematics=md_predKinematics,
-                    md_predEmbedding=md_predEmbedding,
-                ),
-                md_isKept=md_predProbFake < self.fake_cut,
+                md_coordinates=self.cluster_coordinates(pred=pred),
+                md_isKept=pred.md_predProbFake < self.fake_cut,
                 eps=self.eps,
             )
             event_trackcands.append(
                 trackcands_from_mdclusters(
                     mds=mds,
                     md_mdclusterIdx=md_mdclusterIdx,
-                    md_predProbFake=md_predProbFake,
-                    md_predKinematics=md_predKinematics,
+                    md_predProbFake=pred.md_predProbFake,
+                    md_predKinematics=pred.md_predKinematics,
                 )
             )
         return event_trackcands
 
-    def cluster_coordinates(
-        self,
-        md_predKinematics: np.ndarray,
-        md_predEmbedding: np.ndarray,
-    ) -> np.ndarray:
+    def cluster_coordinates(self, pred: MDPredictions) -> np.ndarray:
         """The per-MD coordinates DBSCAN clusters, chosen by cluster_space: kinematics or embedding."""
         if self.config["cluster_space"] == "kinematics":
-            return md_predKinematics
-        return md_predEmbedding
+            return pred.md_predKinematics
+        return pred.md_predEmbedding
 
     def save(self, path: str) -> None:
         """The config, the network's state_dict (windows included), fake_cut and eps, as one dict."""
@@ -709,12 +751,49 @@ def patch_grid(config: dict) -> tuple[int, int]:
 # ---------------------------------------------------------------- training
 
 
+@dataclass
+class LossTerms:
+    """The unweighted loss terms of one batch, or their mean over validation batches."""
+
+    bce: torch.Tensor
+    mse: torch.Tensor
+    sim_vz: torch.Tensor
+    sim_vtxperp: torch.Tensor
+    contrastive: torch.Tensor
+
+    def total(self, config: dict) -> torch.Tensor:
+        """The weighted sum: bce weighs 1, the others their *_weight from config."""
+        return (
+            self.bce
+            + config["mse_weight"] * self.mse
+            + config["sim_vz_weight"] * self.sim_vz
+            + config["sim_vtxperp_weight"] * self.sim_vtxperp
+            + config["contrastive_weight"] * self.contrastive
+        )
+
+    def log_text(self) -> str:
+        """loss_<term>=value for every term, for the [train] and [val] lines."""
+        return " ".join(
+            f"loss_{name}={term.item():.4f}" for name, term in vars(self).items()
+        )
+
+    @classmethod
+    def mean(cls, terms: list["LossTerms"]) -> "LossTerms":
+        return cls(
+            **{
+                name: torch.stack([getattr(term, name) for term in terms]).mean()
+                for name in vars(terms[0])
+            }
+        )
+
+
 class MDTransformerLightningModule(pl.LightningModule):
     """
     Trains an MDTransformerModule: BCE on the fake logit of MDs outside the margin, plus mse_weight times the MSE
-    of SIM_KINEMATICS on real MDs outside the margin, plus (if embed_dim > 0) contrastive_weight times
-    contrastive_loss. AdamW with a one-cycle learning rate. Logs [train] every log_every steps and [val] per
-    epoch; the hyperparameters (the config) go to hparams.yaml.
+    of SIM_KINEMATICS on real MDs outside the margin, plus sim_vz_weight and sim_vtxperp_weight times the MSE of
+    each vertex output (as MDInputs.md_simVertex) on the same MDs, plus (if embed_dim > 0) contrastive_weight
+    times contrastive_loss. AdamW with a one-cycle learning rate. Logs [train] every log_every steps and [val]
+    per epoch; the hyperparameters (the config) go to hparams.yaml.
     """
 
     def __init__(self, config: dict, module: "MDTransformerModule") -> None:
@@ -722,17 +801,14 @@ class MDTransformerLightningModule(pl.LightningModule):
         self.save_hyperparameters(config)
         self.config = config
         self.module = module
-        # One (bce, mse, contrastive) row per validation event, averaged at the end of the epoch
+        # One LossTerms per validation event, averaged at the end of the epoch
         self.val_losses = []
         self.start = time.time()
 
-    def losses(
-        self,
-        batch: PatchBatch,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """(bce, mse, contrastive), each unweighted; contrastive is 0 if embed_dim is 0."""
-        md_predIsFakeLogit, md_predKinematics, md_predEmbedding = self.module(
-            batch=batch
+    def losses(self, batch: PatchBatch) -> LossTerms:
+        """The unweighted loss terms; contrastive is 0 if embed_dim is 0."""
+        md_predIsFakeLogit, md_predKinematics, md_predVertex, md_predEmbedding = (
+            self.module(batch=batch)
         )
         md_isInLoss = batch.md_isValid & ~batch.md_isMargin
         bce = nn.functional.binary_cross_entropy_with_logits(
@@ -744,6 +820,8 @@ class MDTransformerLightningModule(pl.LightningModule):
             md_predKinematics[md_isReal],
             batch.md_simKinematics[md_isReal],
         )
+        md_predVertex = md_predVertex[md_isReal]
+        md_simVertex = batch.md_simVertex[md_isReal]
         if self.config["embed_dim"] > 0:
             contrastive = contrastive_loss(
                 md_embedding=md_predEmbedding,
@@ -752,23 +830,17 @@ class MDTransformerLightningModule(pl.LightningModule):
             )
         else:
             contrastive = torch.zeros((), device=bce.device)
-        return bce, mse, contrastive
-
-    def total_loss(
-        self,
-        bce: torch.Tensor,
-        mse: torch.Tensor,
-        contrastive: torch.Tensor,
-    ) -> torch.Tensor:
-        return (
-            bce
-            + self.config["mse_weight"] * mse
-            + self.config["contrastive_weight"] * contrastive
+        return LossTerms(
+            bce=bce,
+            mse=mse,
+            sim_vz=nn.functional.mse_loss(md_predVertex[:, 0], md_simVertex[:, 0]),
+            sim_vtxperp=nn.functional.mse_loss(md_predVertex[:, 1], md_simVertex[:, 1]),
+            contrastive=contrastive,
         )
 
     def training_step(self, batch: PatchBatch, batch_idx: int) -> torch.Tensor:
-        bce, mse, contrastive = self.losses(batch=batch)
-        loss = self.total_loss(bce=bce, mse=mse, contrastive=contrastive)
+        terms = self.losses(batch=batch)
+        loss = terms.total(config=self.config)
         # To metrics.csv, every log_every steps (make_trainer)
         self.log("train_loss", loss, batch_size=1)
         if batch_idx % self.config["log_every"] == 0:
@@ -780,8 +852,7 @@ class MDTransformerLightningModule(pl.LightningModule):
             print_and_log(
                 line=(
                     f"[train] epoch={self.current_epoch} step={batch_idx} loss={loss.item():.4f} "
-                    f"loss_bce={bce.item():.4f} loss_mse={mse.item():.4f} "
-                    f"loss_contrastive={contrastive.item():.4f} n_patches={batch.md_inputs.shape[0]} "
+                    f"{terms.log_text()} n_patches={batch.md_inputs.shape[0]} "
                     f"n_md_max={batch.md_inputs.shape[1]} gpu_mem_peak_gb={gpu_mem:.2f} "
                     f"seconds={time.time() - self.start:.0f}"
                 ),
@@ -790,20 +861,19 @@ class MDTransformerLightningModule(pl.LightningModule):
         return loss
 
     def validation_step(self, batch: PatchBatch, batch_idx: int) -> None:
-        self.val_losses.append(torch.stack(self.losses(batch=batch)))
+        self.val_losses.append(self.losses(batch=batch))
 
     def on_validation_epoch_end(self) -> None:
-        bce, mse, contrastive = torch.stack(self.val_losses).mean(dim=0)
+        terms = LossTerms.mean(terms=self.val_losses)
         n_events = len(self.val_losses)
         self.val_losses.clear()
-        loss = self.total_loss(bce=bce, mse=mse, contrastive=contrastive)
+        loss = terms.total(config=self.config)
         # val_loss picks the best checkpoint (make_trainer)
         self.log("val_loss", loss)
         print_and_log(
             line=(
                 f"[val] epoch={self.current_epoch} n_events={n_events} loss={loss.item():.4f} "
-                f"loss_bce={bce.item():.4f} loss_mse={mse.item():.4f} "
-                f"loss_contrastive={contrastive.item():.4f} seconds={time.time() - self.start:.0f}"
+                f"{terms.log_text()} seconds={time.time() - self.start:.0f}"
             ),
             config=self.config,
         )
@@ -985,7 +1055,7 @@ class PrintProgress(pl.Callback):
 class MDTransformerModule(nn.Module):
     """
     A per-MD input MLP, n_blocks MDTransformerBlocks with the layer-pair window mask, and a head -> (fake logit,
-    SIM_KINEMATICS, embedding). The head's hidden layer is
+    SIM_KINEMATICS, vertex, embedding). The head's hidden layer is
     shared; only its last linear layer has separate rows per output. The windows are buffers, so they are saved
     with the state_dict.
     """
@@ -1011,11 +1081,14 @@ class MDTransformerModule(nn.Module):
         )
         # Pre-norm blocks leave their output unnormalised
         self.norm = nn.LayerNorm(hidden)
-        # Outputs: fake logit, SIM_KINEMATICS, embedding
+        # Outputs: fake logit, SIM_KINEMATICS, vertex (as MDInputs.md_simVertex), embedding
         self.head = nn.Sequential(
             nn.Linear(hidden, hidden),
             nn.GELU(),
-            nn.Linear(hidden, 1 + len(SIM_KINEMATICS) + config["embed_dim"]),
+            nn.Linear(
+                hidden,
+                1 + len(SIM_KINEMATICS) + len(SIM_VERTEX_SCALES) + config["embed_dim"],
+            ),
         )
         self.register_buffer("window_eta", windows.eta.clone())
         self.register_buffer("window_phi", windows.phi.clone())
@@ -1023,18 +1096,25 @@ class MDTransformerModule(nn.Module):
     def forward(
         self,
         batch: PatchBatch,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        md_predIsFakeLogit (n_patches, n_md_max), md_predKinematics (n_patches, n_md_max, 4) and
-        md_predEmbedding (n_patches, n_md_max, embed_dim), with phi relative to the patch centre.
+        md_predIsFakeLogit (n_patches, n_md_max), md_predKinematics (n_patches, n_md_max, 4) with phi relative
+        to the patch centre, md_predVertex (n_patches, n_md_max, 2) as MDInputs.md_simVertex, and
+        md_predEmbedding (n_patches, n_md_max, embed_dim).
         """
         mask = self.attention_mask(batch=batch)
         hid = self.input_mlp(batch.md_inputs)
         for block in self.blocks:
             hid = block(hid=hid, mask=mask)
         out = self.head(self.norm(hid))
-        n_kinematics = len(SIM_KINEMATICS)
-        return out[..., 0], out[..., 1 : 1 + n_kinematics], out[..., 1 + n_kinematics :]
+        end_kinematics = 1 + len(SIM_KINEMATICS)
+        end_vertex = end_kinematics + len(SIM_VERTEX_SCALES)
+        return (
+            out[..., 0],
+            out[..., 1:end_kinematics],
+            out[..., end_kinematics:end_vertex],
+            out[..., end_vertex:],
+        )
 
     def attention_mask(self, batch: PatchBatch) -> torch.Tensor:
         """
@@ -1107,9 +1187,10 @@ class MDTransformerBlock(nn.Module):
 def log_md_quality(algo: MDTransformerNet, paths: list[str]) -> None:
     """
     One [md_quality] line over every MD of paths: the fraction of fake MDs rejected when 90% of real MDs are kept,
-    and the IQR of the q/pT, eta and phi residuals of real MDs.
+    and the IQR of the q/pT, eta, phi, sim_vz and sim_vtxperp (cm) residuals of real MDs.
     """
     probs, is_fake, kinematics, sim_kinematics = [], [], [], []
+    vertex, sim_vertex = [], []
     start = time.time()
     for idx, path in enumerate(paths):
         print_and_log(
@@ -1117,18 +1198,29 @@ def log_md_quality(algo: MDTransformerNet, paths: list[str]) -> None:
             config=algo.config,
         )
         mds = read_event(path=path)
-        md_predProbFake, md_predKinematics, _ = algo.predict(mds=mds)
+        pred = algo.predict(mds=mds)
         mdi = MDInputs.from_mds(mds=mds, pt_min=algo.config["pt_min"])
-        probs.append(md_predProbFake)
+        probs.append(pred.md_predProbFake)
         is_fake.append(mdi.md_simIsFake.numpy())
-        kinematics.append(md_predKinematics)
+        kinematics.append(pred.md_predKinematics)
         sim_kinematics.append(mdi.md_simKinematics.numpy())
+        vertex.append(pred.md_predVertex)
+        sim_vertex.append(
+            mds.md_simFeatures[
+                :,
+                [SIM_FEATURES.index("sim_vz"), SIM_FEATURES.index("sim_vtxperp")],
+            ].numpy()
+        )
     probs = np.concatenate(probs)
     is_fake = np.concatenate(is_fake)
     is_real = ~is_fake
     # Real MDs only: (q/pT, eta, cos phi, sin phi) and the sim's (q/pT, eta, phi)
     kinematics = np.concatenate(kinematics)[is_real]
     sim_kinematics = np.concatenate(sim_kinematics)[is_real]
+    # Real MDs only: (sim_vz, sim_vtxperp) in cm
+    vertex_residual = (
+        np.concatenate(vertex)[is_real] - np.concatenate(sim_vertex)[is_real]
+    )
     cut_keep90 = np.quantile(probs[is_real], 0.9)
     phi = np.arctan2(kinematics[:, 3], kinematics[:, 2])
     phi_residual = wrap_phi(torch.from_numpy(phi - sim_kinematics[:, 2])).numpy()
@@ -1138,7 +1230,9 @@ def log_md_quality(algo: MDTransformerNet, paths: list[str]) -> None:
             f"frac_fake_rejected_at_real_keep_0.9={np.mean(probs[is_fake] >= cut_keep90):.4f} "
             f"qoverpt_res_iqr={iqr(kinematics[:, 0] - sim_kinematics[:, 0]):.4f} "
             f"eta_res_iqr={iqr(kinematics[:, 1] - sim_kinematics[:, 1]):.4f} "
-            f"phi_res_iqr={iqr(phi_residual):.4f}"
+            f"phi_res_iqr={iqr(phi_residual):.4f} "
+            f"vz_res_iqr={iqr(vertex_residual[:, 0]):.4f} "
+            f"vtxperp_res_iqr={iqr(vertex_residual[:, 1]):.4f}"
         ),
         config=algo.config,
     )
