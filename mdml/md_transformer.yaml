@@ -23,8 +23,8 @@ margin_eta: 0.25
 margin_phi: 0.5
 
 # ---- network
-n_blocks: 4
-hidden: 64
+n_blocks: 8
+hidden: 256
 n_heads: 4
 dropout: 0.0
 # false: phi only relative to the patch centre (phi-symmetric network); true: also each MD's absolute phi
@@ -41,7 +41,7 @@ window_scale: 1.0
 window_n_events: 20
 
 # ---- training
-epochs: 3
+epochs: 10
 lr: 0.001
 weight_decay: 0.01
 mse_weight: 1.0
