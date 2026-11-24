@@ -1,19 +1,10 @@
 # MDML: a directory for MD-level models
 
+MDTransformer is a more robust network that groups outer-tracker mini-doublets (MDs) into track candidates, and we will target performance to be better than T5 track reconstruction.
+
 SimpleMDNet is a barebones network that groups outer-tracker mini-doublets (MDs) into track candidates. Its purpose is to be a real model, in the ballpark of competent, to build infrastructure around (training, inference, evaluation with `harness/`). Physics performance is not the goal yet: it will fail in dense regions and has known limits.
 
-MDTransformer will be a more robust network that groups outer-tracker mini-doublets (MDs) into track candidates, and we will target performance to be better than T5 track reconstruction.
-
 This file is the living design note: update it whenever a decision is made or changed.
-
-## How it works: SimpleMDNet
-
-1. Each MD goes through a feed-forward MLP on its own features (no neighbours, no attention).
-2. The MLP predicts, per MD, whether it is fake and the kinematics of its sim: q/pT, η, cos φ, sin φ.
-3. MDs with a high predicted fake probability are dropped.
-4. DBSCAN clusters the remaining MDs in the predicted (q/pT, η, cos φ, sin φ) space; each cluster is a track candidate.
-
-Input: the per-event `.pt` files of `transformer-datasets` `md_processing.py`, with the `md_*` arrays.
 
 ## How it works: MDTransformer
 
@@ -48,6 +39,15 @@ weighted by `sim_vz_weight` and `sim_vtxperp_weight` (default 0.0), `[md_quality
 `vtxperp_res_iqr` in cm; not in `cluster_space`. Still to do: a training run with the weights > 0.
 
 Todo: speed up `MDTransformerNet.predict`, about 2 s of the harness's 2.2 s per event on the V100 (run_2026_11_19_224953, first validation file). About 1.3 s of it is building the 84 grid patches on the CPU, each scanning all ~50k MDs of the event; the forward pass is 0.45–0.8 s. Ideas: sort MDs into grid cells once, build patches on the GPU, a larger `patches_per_batch`.
+
+## How it works: SimpleMDNet
+
+1. Each MD goes through a feed-forward MLP on its own features (no neighbours, no attention).
+2. The MLP predicts, per MD, whether it is fake and the kinematics of its sim: q/pT, η, cos φ, sin φ.
+3. MDs with a high predicted fake probability are dropped.
+4. DBSCAN clusters the remaining MDs in the predicted (q/pT, η, cos φ, sin φ) space; each cluster is a track candidate.
+
+Input: the per-event `.pt` files of `transformer-datasets` `md_processing.py`, with the `md_*` arrays.
 
 ## Pieces, bottom-up
 
