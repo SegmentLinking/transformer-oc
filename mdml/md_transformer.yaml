@@ -46,8 +46,8 @@ lr: 0.001
 weight_decay: 0.01
 mse_weight: 1.0
 # MSE of asinh(sim_vz / SIM_VZ_SCALE) and log1p(sim_vtxperp / SIM_VTXPERP_SCALE) (md_transformer.py); 0: off
-sim_vz_weight: 0.0
-sim_vtxperp_weight: 0.0
+sim_vz_weight: 0.01
+sim_vtxperp_weight: 0.01
 # Contrastive loss (if embed_dim > 0): pull same-sim MDs together, push others beyond contrastive_margin
 contrastive_weight: 1.0
 contrastive_margin: 1.0
