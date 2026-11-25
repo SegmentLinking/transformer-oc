@@ -7,7 +7,7 @@ You can run me like:
 import math
 import torch
 
-from dataset import eta_phi_mask, validate_mask_args
+from dataset import center_generator, eta_phi_mask, mask_centers, validate_mask_args
 
 
 def test_eta_phi_mask_inside_outside():
@@ -50,6 +50,27 @@ def test_eta_phi_mask_large_half_width_keeps_all():
     eta = torch.tensor([-2.6, 0.0, 2.6])
     phi = torch.tensor([-math.pi, 0.0, math.pi])
     assert eta_phi_mask(eta, phi, 2.6, -math.pi, 5.2, math.pi).all()
+
+
+def test_mask_centers_fixed_are_kept():
+    assert mask_centers(0.3, -1.0, generator=center_generator(7, 0)) == (0.3, -1.0)
+
+
+def test_mask_centers_seeded_repeat_per_event():
+    first = [mask_centers(None, None, generator=center_generator(42, idx)) for idx in range(5)]
+    again = [mask_centers(None, None, generator=center_generator(42, idx)) for idx in range(5)]
+    assert first == again
+    assert len(set(first)) == 5  # different events get different centers
+
+
+def test_mask_centers_seed_changes_centers():
+    assert mask_centers(None, None, center_generator(1, 3)) != mask_centers(None, None, center_generator(2, 3))
+
+
+def test_mask_centers_unseeded_vary():
+    assert center_generator(None, 0) is None
+    draws = {mask_centers(None, None) for _ in range(5)}
+    assert len(draws) == 5
 
 
 def assert_raises_value_error(func, **kwargs):

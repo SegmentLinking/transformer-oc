@@ -38,10 +38,14 @@ class PCDataset(Dataset):
         eta_mask_center=0.0,
         phi_mask_center=0.0,
         normalization=None,
+        center_seed=None,
     ):
         """
         normalization: dict from normalization.compute_normalization (per-feature min/max and log columns).
         None falls back to the legacy hardcoded ranges in src/constants.py.
+        center_seed: None draws random mask centers anew every time an event is loaded (training).
+        An integer derives them from (center_seed, event index) instead, so each event always gets
+        the same patch (validation: val_loss then changes only when the model does).
         """
         self.data_dir = data_dir
         if normalization is None:
@@ -67,6 +71,7 @@ class PCDataset(Dataset):
         self.phi_mask_center = phi_mask_center
         self.eta_mask_half_width = eta_mask_half_width
         self.phi_mask_half_width = phi_mask_half_width
+        self.center_seed = center_seed
 
         self.graph_files = list_graph_files(data_dir)
 
@@ -85,7 +90,7 @@ class PCDataset(Dataset):
         graph.eta = graph.x[:, self.eta_column].clone()
         graph.phi = graph.x[:, self.phi_column].clone()
 
-        self.apply_eta_phi_mask(graph)
+        self.apply_eta_phi_mask(graph, idx)
 
         x = log_transform(graph.x, FEATURE_NAMES, self.log_features)
         graph.x = (x - self.feature_min) / (self.feature_max - self.feature_min + 1e-8)
@@ -93,7 +98,7 @@ class PCDataset(Dataset):
         graph.filename = os.path.basename(graph_path)
         return graph
 
-    def apply_eta_phi_mask(self, graph):
+    def apply_eta_phi_mask(self, graph, idx):
         """
         Cut all per-T3 fields of `graph` (every tensor field except NON_T3_FIELDS) in place to
         the eta/phi mask region, and attach the centers used as graph.eta_mask_center and
@@ -101,13 +106,11 @@ class PCDataset(Dataset):
 
         With no half widths (full event), the centers are attached and nothing is cut.
         """
-        # torch RNG, so DataLoader workers draw different centers
-        eta_center = self.eta_mask_center
-        phi_center = self.phi_mask_center
-        if eta_center is None:
-            eta_center = ETA_MIN + (ETA_MAX - ETA_MIN) * torch.rand(()).item()
-        if phi_center is None:
-            phi_center = PHI_MIN + (PHI_MAX - PHI_MIN) * torch.rand(()).item()
+        eta_center, phi_center = mask_centers(
+            eta_center=self.eta_mask_center,
+            phi_center=self.phi_mask_center,
+            generator=center_generator(self.center_seed, idx),
+        )
 
         graph.eta_mask_center = torch.tensor(eta_center)
         graph.phi_mask_center = torch.tensor(phi_center)
@@ -144,6 +147,28 @@ class PCDataset(Dataset):
             'node_features_dim': sample.num_node_features,
             'sim_features_dim': sample.sim_features.shape[1] if hasattr(sample, 'sim_features') else None
         }
+
+
+def center_generator(center_seed, idx):
+    """
+    Generator for the mask centers of event idx: None (global torch RNG, so DataLoader workers draw
+    different centers) if center_seed is None, otherwise one seeded from (center_seed, idx).
+    """
+    if center_seed is None:
+        return None
+    return torch.Generator().manual_seed(center_seed * 1_000_003 + idx)
+
+
+def mask_centers(eta_center, phi_center, generator=None):
+    """
+    The (eta, phi) mask center for one event: a fixed center is kept, and a center of None is drawn
+    uniformly from [ETA_MIN, ETA_MAX] or [PHI_MIN, PHI_MAX] with the given generator.
+    """
+    if eta_center is None:
+        eta_center = ETA_MIN + (ETA_MAX - ETA_MIN) * torch.rand((), generator=generator).item()
+    if phi_center is None:
+        phi_center = PHI_MIN + (PHI_MAX - PHI_MIN) * torch.rand((), generator=generator).item()
+    return eta_center, phi_center
 
 
 def eta_phi_mask(eta, phi, eta_center, phi_center, eta_half_width, phi_half_width):

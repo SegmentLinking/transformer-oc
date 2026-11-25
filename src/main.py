@@ -66,9 +66,11 @@ class ParticleTrackingDataModule(pl.LightningDataModule):
                 subset=self.config.get('train_subset', None),
                 **mask_kwargs,
             )
+            # Validation patches are fixed per event, so val_loss (and early stopping) only sees model changes
             self.val_dataset = PCDataset(
                 self.config['val_data_dir'],
                 subset=self.config.get('val_subset', None),
+                center_seed=self.config.get('val_mask_seed', self.config['seed']),
                 **mask_kwargs,
             )
             
