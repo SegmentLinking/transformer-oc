@@ -34,8 +34,8 @@ apptainer exec --nv /ceph/users/atuna/ml-tracking.sif python3 <script> ...
 ```
 
 - `--nv` is required: without it, `fastgraphcompute` (the OC loss) fails to import.
-- The image lacks `statsmodels` (imported by `analysis/main.py`) and `pytest`.
-- Local GPU here is a single Tesla V100 16 GB (device 0). `config_pu200.yaml` uses `gpus: [1]`, and `analysis/main.py` hardcodes `cuda:1`; both need changing to run locally.
+- The image lacks `pytest`.
+- Local GPU here is a single Tesla V100 16 GB (device 0). `config_pu200.yaml` uses `gpus: [1]`, which needs changing to run locally; `analysis/main.py` takes `--device` (default `cuda:0`).
 
 ## Data
 
@@ -65,11 +65,11 @@ cd data && python3 test_t3_processing.py
 Several of these (flat imports, normalization, batch = 1 event, OC targets) describe the current code and are expected to change with the redesign above.
 
 - **Imports are flat** (`from dataset import ...`, `from constants import ...`). `src/` scripts rely on their own directory being on `sys.path`, `analysis/main.py` does `sys.path.append('./src')`, and config data paths are relative. Run from the repo root (preprocessing from `data/`).
-- **Feature normalization is computed from the training data.** Per-column min/max (after log-transforming `t3_pt`) over all training files is precomputed with `python3 src/normalization.py --data-dir <train dir> --output <file>` (the current dataset's is `normalization_train.json` next to its `train/`) and set as `normalization_file` in the configs; with `normalization_file: null`, `src/main.py` computes it from `normalization_n_files` training files instead. `src/main.py` passes it to `PCDataset`, and saves it as `<run dir>/normalization.json` and in the checkpoint hparams; `analysis/main.py` reuses that file, and falls back to the legacy hardcoded ranges in `src/constants.py` for older runs. Columns of `x` are looked up by name through `FEATURE_NAMES` in `src/constants.py`, which must match the dataset's layout (checked on load). The model's ΔR neighbor search uses the raw `graph.eta`/`graph.phi` attached by `PCDataset`. `analysis/measures.py` still un-normalizes pT/η and reads MD x/y from hardcoded columns.
+- **Feature normalization is computed from the training data.** Per-column min/max (after log-transforming `t3_pt`) over all training files is precomputed with `python3 src/normalization.py --data-dir <train dir> --output <file>` (the current dataset's is `normalization_train.json` next to its `train/`) and set as `normalization_file` in the configs; with `normalization_file: null`, `src/main.py` computes it from `normalization_n_files` training files instead. `src/main.py` passes it to `PCDataset`, and saves it as `<run dir>/normalization.json` and in the checkpoint hparams; `analysis/main.py` takes it from the checkpoint hparams (else the run dir's `normalization.json`), and falls back to the legacy hardcoded ranges in `src/constants.py` for older runs. Columns of `x` are looked up by name through `FEATURE_NAMES` in `src/constants.py`, which must match the dataset's layout (checked on load). The model's ΔR neighbor search uses the raw `graph.eta`/`graph.phi` attached by `PCDataset`. `analysis/measures.py` un-normalizes `x` with it (`normalization.unnormalize`) to get raw pT/η and MD positions.
 - **Batch size is 1 event** (the PyG `DataLoader` default), with `accumulate_grad_batches` for an effective batch. Memory scales with `N_T3 × max_neighbors × hidden_dim`. Full-size configs have OOMed on a 16 GB GPU, so use `config_pu200_dev.yaml` (small `hidden_dim`, `max_neighbors`, subsets) locally.
 - Attention is sparse over ΔR neighbors (`dr_threshold`, `max_neighbors`), not full self-attention.
 - OC targets: `sim_index < 0` is mapped to `-1` (noise) in the training and validation steps.
-- `analysis/main.py` rebuilds `TransformerOCModel` from the config but does not pass `max_neighbors`, so it falls back to the default (64). Keep the analysis config consistent with the training config, or pass the parameters explicitly.
+- `analysis/main.py` rebuilds `TransformerOCModel` from the checkpoint hparams (the config only for keys an old checkpoint lacks). Clusters are truth-matched LST-style from their distinct hits (`analysis/hit_matching.py`: matched if > `purity_threshold` of the hits are on the best sim), and efficiency/duplicate rate are over all selected signal sims (`sim_features` rows; sim indices ≥ `len(sim_features)` are pileup). `--t5`/`--tc` compare with LST objects read from each graph's own LSTNtuple entry (needs `-B /ceph`). It evaluates the `test` split by default (`--split`), whole events unless `--patch`.
 - `debug: true` in a config disables early stopping, monitors `train_loss` for checkpoints and saves every epoch.
 - Checkpoint state dicts are prefixed with `model.`. `analysis/main.py` strips the prefix when loading.
 

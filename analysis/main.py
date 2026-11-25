@@ -1,4 +1,19 @@
+"""
+Evaluate a trained model: run inference and DBSCAN clustering on every event of a dataset split, match
+the clusters to sim tracks with LST-style hit matching (hit_matching.py), and plot efficiency, fake rate,
+duplicate rate and purity vs pT and eta, optionally against LST's T5s / track candidates of the same events.
+
+Run from the repo root, e.g.
+  apptainer exec --nv -B /ceph /ceph/users/atuna/ml-tracking.sif python3 analysis/main.py \
+      --config config_pu200_mask.yaml --output output/lightning_logs/version_N/ --plot-output <dir> --t5
+"""
 import os
+# Cap the BLAS/OpenMP threads before NumPy is imported: on many-core nodes (256 here) OpenBLAS can hang
+# with its default of one thread per core. Override by setting the variables in the environment.
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "8")
+import re
+from collections import defaultdict
 from glob import glob
 import numpy as np
 from argparse import ArgumentParser
@@ -10,409 +25,182 @@ import torch
 from torch_geometric.loader import DataLoader
 
 import uproot
-import awkward as ak
 
 import matplotlib.pyplot as plt
 import mplhep as hep
 hep.style.use(hep.style.CMS)
 
-from statsmodels.stats.proportion import proportion_confint
+from scipy.stats import beta as beta_dist
 
 import sys
-sys.path.append('./src')
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(_HERE, '..', 'src'))
 
 from dataset import PCDataset
 from helpers import load_config
-from measures import calculate_tracking_metrics, run_inference_and_clustering, plot_cluster_size_histogram, plot_layer_span_histogram, plot_layer_span_2d
+from hit_matching import select_sims
+from normalization import load_normalization
+from measures import (calculate_tracking_metrics, run_inference_and_clustering, plot_cluster_size_histogram,
+                      plot_layer_span_histogram, plot_layer_span_2d, t3_beta_hit_fraction_hist,
+                      plot_beta_vs_hit_fraction, plot_cluster_hit_fraction)
+
+# Graph file of entry N of LSTNtuple_<name>.root, as written by transformer-datasets
+GRAPH_FILE = re.compile(r"^(?P<ntuple>.+\.root)\.entry_(?P<entry>\d+)\.pt$")
+DEFAULT_LSTNTUPLE_DIR = "/ceph/users/atuna/CMSSW_20_1_0_pre2/src/ttbar_lstntuple"
+LST_LABELS = {"t5": "LST T5s", "tc": "LST track candidates"}
 
 
-def _md_majority(sims):
-    """Majority sim and purity for each row of MD sim indices, matching calculate_tracking_metrics:
-    the majority is taken over matched (>= 0) MDs, purity = majority count / all MDs."""
-    sims = np.asarray(sims)
-    n = sims.shape[0]
-    if n == 0:
-        return np.zeros(0, dtype=np.int64), np.zeros(0)
-    counts = (sims[:, :, None] == sims[:, None, :]).sum(axis=2)
-    counts = np.where(sims >= 0, counts, 0)
-    best = counts.argmax(axis=1)
-    rows = np.arange(n)
-    best_count = counts[rows, best]
-    maj = np.where(best_count > 0, sims[rows, best], -1).astype(np.int64)
-    return maj, best_count / sims.shape[1]
+def lstntuple_events(graph_files, lstntuple_dir):
+    """(LSTNtuple path, entry) of every graph file, from its name LSTNtuple_<name>.root.entry_<N>.pt."""
+    events = []
+    for path in graph_files:
+        m = GRAPH_FILE.match(os.path.basename(path))
+        if m is None:
+            raise ValueError(f"Can't tell the LSTNtuple entry of {path}: expected LSTNtuple_<name>.root.entry_<N>.pt")
+        events.append((os.path.join(lstntuple_dir, m["ntuple"]), int(m["entry"])))
+    return events
 
 
-def load_t5_data(root_file_pattern, max_events=None):
-    """Load T5 data from ROOT file(s)."""
-
-    files = glob(root_file_pattern) if '*' in root_file_pattern or '?' in root_file_pattern else [root_file_pattern]
-
-    all_data = {
-        't5_pt': [], 't5_eta': [], 'sim_pt': [], 'sim_eta': [], 'sim_q': [],
-        'sim_vx': [], 'sim_vy': [], 'sim_vz': [], 'sim_t5IdxAllFrac': [],
-        't5_isFake': [], 't5_isDup': [],
-        't5_majSim': [], 't5_mdPurity': [], 't3_simIdx': [], 't3_pt': []
-    }
-
-    total_loaded = 0
-
-    for root_file in files:
-        if max_events is not None and total_loaded >= max_events:
-            break
-
-        with uproot.open(root_file) as f:
-            if "tree" not in f:
-                continue
-            tree = f["tree"]
-
-            t5_pt = tree["t5_pt"].array()
-            t5_eta = tree["t5_eta"].array()
-            sim_pt = tree["sim_pt"].array()
-            sim_eta = tree["sim_eta"].array()
-            sim_q = tree["sim_q"].array()
-            sim_vx = tree["sim_vx"].array()
-            sim_vy = tree["sim_vy"].array()
-            sim_vz = tree["sim_vz"].array()
-            sim_t5IdxAllFrac = tree["sim_t5IdxAllFrac"].array()
-
-            # Load arrays for calculating fake rate using MD-based matching
-            t5_t3Idx0 = tree["t5_t3Idx0"].array()
-            t5_t3Idx1 = tree["t5_t3Idx1"].array()
-            t3_lsIdx0 = tree["t3_lsIdx0"].array()
-            t3_lsIdx1 = tree["t3_lsIdx1"].array()
-            ls_mdIdx0 = tree["ls_mdIdx0"].array()
-            ls_mdIdx1 = tree["ls_mdIdx1"].array()
-            md_simIdx = tree["md_simIdx"].array()
-            t5_isDup = tree["t5_isDuplicate"].array()
-            t3_simIdx = tree["t3_simIdx"].array()
-            t3_pt = tree["t3_pt"].array()
-
-            # Get all 8 MD sim indices for each T5
-            md_simIdx0 = md_simIdx[ls_mdIdx0[t3_lsIdx0[t5_t3Idx0]]]
-            md_simIdx1 = md_simIdx[ls_mdIdx1[t3_lsIdx0[t5_t3Idx0]]]
-            md_simIdx2 = md_simIdx[ls_mdIdx0[t3_lsIdx1[t5_t3Idx0]]]
-            md_simIdx3 = md_simIdx[ls_mdIdx1[t3_lsIdx1[t5_t3Idx0]]]
-            md_simIdx4 = md_simIdx[ls_mdIdx0[t3_lsIdx0[t5_t3Idx1]]]
-            md_simIdx5 = md_simIdx[ls_mdIdx1[t3_lsIdx0[t5_t3Idx1]]]
-            md_simIdx6 = md_simIdx[ls_mdIdx0[t3_lsIdx1[t5_t3Idx1]]]
-            md_simIdx7 = md_simIdx[ls_mdIdx1[t3_lsIdx1[t5_t3Idx1]]]
-
-            n_events = len(md_simIdx0)
-            if max_events is not None and total_loaded + n_events > max_events:
-                n_events = max_events - total_loaded
-
-            t5_isFake = []
-            t5_majSim = []
-            t5_mdPurity = []
-
-            for evt in range(n_events):
-                evt_md_simIdx0 = np.asarray(md_simIdx0[evt])
-                evt_md_simIdx1 = np.asarray(md_simIdx1[evt])
-                evt_md_simIdx2 = np.asarray(md_simIdx2[evt])
-                evt_md_simIdx3 = np.asarray(md_simIdx3[evt])
-                evt_md_simIdx4 = np.asarray(md_simIdx4[evt])
-                evt_md_simIdx5 = np.asarray(md_simIdx5[evt])
-                evt_md_simIdx6 = np.asarray(md_simIdx6[evt])
-                evt_md_simIdx7 = np.asarray(md_simIdx7[evt])
-
-                match_count = zip(evt_md_simIdx0, evt_md_simIdx1, evt_md_simIdx2, evt_md_simIdx3,
-                                  evt_md_simIdx4, evt_md_simIdx5, evt_md_simIdx6, evt_md_simIdx7)
-
-                matches = []
-                for i, sims in enumerate(match_count):
-                    sims = np.array(sims)
-                    unique, counts = np.unique(sims, return_counts=True)
-                    majority_sim = unique[np.argmax(counts)]
-                    if majority_sim < 0:
-                        matches.append(0)
-                    else:
-                        matches.append(np.sum(sims == majority_sim))
-
-                matching_fraction = np.array(matches) / 8.0
-                evt_t5_isFake = matching_fraction <= 0.75
-                t5_isFake.append(evt_t5_isFake)
-
-                # Cluster-style matching: treat the T5 as a cluster of its 2 T3s
-                evt_sims = np.stack([evt_md_simIdx0, evt_md_simIdx1, evt_md_simIdx2, evt_md_simIdx3,
-                                     evt_md_simIdx4, evt_md_simIdx5, evt_md_simIdx6, evt_md_simIdx7], axis=1)
-                maj, pur = _md_majority(evt_sims)
-                t5_majSim.append(maj)
-                t5_mdPurity.append(pur)
-
-            t5_isFake = ak.Array(t5_isFake)
-
-            all_data['t5_pt'].append(t5_pt[:n_events])
-            all_data['t5_eta'].append(t5_eta[:n_events])
-            all_data['sim_pt'].append(sim_pt[:n_events])
-            all_data['sim_eta'].append(sim_eta[:n_events])
-            all_data['sim_q'].append(sim_q[:n_events])
-            all_data['sim_vx'].append(sim_vx[:n_events])
-            all_data['sim_vy'].append(sim_vy[:n_events])
-            all_data['sim_vz'].append(sim_vz[:n_events])
-            all_data['sim_t5IdxAllFrac'].append(sim_t5IdxAllFrac[:n_events])
-            all_data['t5_isFake'].append(t5_isFake)
-            all_data['t5_isDup'].append(t5_isDup[:n_events])
-            all_data['t5_majSim'].append(ak.Array(t5_majSim))
-            all_data['t5_mdPurity'].append(ak.Array(t5_mdPurity))
-            all_data['t3_simIdx'].append(t3_simIdx[:n_events])
-            all_data['t3_pt'].append(t3_pt[:n_events])
-
-            total_loaded += n_events
-
-    return {k: ak.concatenate(v) if len(v) > 0 else ak.Array([]) for k, v in all_data.items()}
-
-
-def calculate_t5_metrics(t5_data, pt_bins, eta_bins, eta_cut=None, purity_threshold=0.75):
-    """Calculate efficiency, fake rate, and duplicate rate for T5 reconstruction."""
-    n_bins_pt = len(pt_bins) - 1
-    n_bins_eta = len(eta_bins) - 1
-
-    hist_eff_num_pt = np.zeros(n_bins_pt)
-    hist_eff_den_pt = np.zeros(n_bins_pt)
-    hist_eff_num_eta = np.zeros(n_bins_eta)
-    hist_eff_den_eta = np.zeros(n_bins_eta)
-
-    hist_fake_num_pt = np.zeros(n_bins_pt)
-    hist_fake_den_pt = np.zeros(n_bins_pt)
-    hist_fake_num_eta = np.zeros(n_bins_eta)
-    hist_fake_den_eta = np.zeros(n_bins_eta)
-
-    hist_dup_num_pt = np.zeros(n_bins_pt)
-    hist_dup_den_pt = np.zeros(n_bins_pt)
-    hist_dup_num_eta = np.zeros(n_bins_eta)
-    hist_dup_den_eta = np.zeros(n_bins_eta)
-
-    n_events = len(t5_data['sim_pt'])
-
-    for evt in range(n_events):
-        sim_pt = np.asarray(t5_data['sim_pt'][evt])
-        sim_eta = np.asarray(t5_data['sim_eta'][evt])
-        sim_q = np.asarray(t5_data['sim_q'][evt])
-        sim_vx = np.asarray(t5_data['sim_vx'][evt])
-        sim_vy = np.asarray(t5_data['sim_vy'][evt])
-        sim_vz = np.asarray(t5_data['sim_vz'][evt])
-        sim_t5IdxAllFrac = t5_data['sim_t5IdxAllFrac'][evt]
-        t5_isFake = np.asarray(t5_data['t5_isFake'][evt])
-        t5_isDup = np.asarray(t5_data['t5_isDup'][evt])
-        t5_pt = np.asarray(t5_data['t5_pt'][evt])
-        t5_eta = np.asarray(t5_data['t5_eta'][evt])
-
-        n_sim = len(sim_pt)
-        n_t5 = len(t5_isFake)
-
-        sim_fracs = ak.fill_none(ak.max(sim_t5IdxAllFrac, axis=1), 0)
-        sim_fracs = np.asarray(sim_fracs)
-
-        # Process sim particles for efficiency
-        for sim_idx in range(n_sim):
-            sim_pt_val = sim_pt[sim_idx]
-            sim_eta_val = sim_eta[sim_idx]
-            sim_q_val = sim_q[sim_idx]
-            sim_vx_val = sim_vx[sim_idx]
-            sim_vy_val = sim_vy[sim_idx]
-            sim_vz_val = sim_vz[sim_idx]
-
-            # Apply selection cuts
-            if sim_q_val == 0:
-                continue
-            if sim_pt_val <= 0.8:
-                continue
-            if abs(sim_eta_val) >= 2.4:
-                continue
-            if abs(sim_vz_val) >= 30:
-                continue
-            rho = np.sqrt(sim_vx_val**2 + sim_vy_val**2)
-            if rho >= 2.5:
-                continue
-
-            is_matched = sim_fracs[sim_idx] > purity_threshold
-
-            in_acceptance_pt = True
-            if eta_cut is not None:
-                eta_min, eta_max = eta_cut
-                in_acceptance_pt = (sim_eta_val >= eta_min) and (sim_eta_val <= eta_max)
-
-            if in_acceptance_pt:
-                pt_bin = np.digitize(sim_pt_val, pt_bins) - 1
-                if 0 <= pt_bin < n_bins_pt:
-                    hist_eff_den_pt[pt_bin] += 1
-                    if is_matched:
-                        hist_eff_num_pt[pt_bin] += 1
-
-            eta_bin = np.digitize(sim_eta_val, eta_bins) - 1
-            if 0 <= eta_bin < n_bins_eta:
-                hist_eff_den_eta[eta_bin] += 1
-                if is_matched:
-                    hist_eff_num_eta[eta_bin] += 1
-
-        # Process T5 tracks for fake rate and duplicate rate
-        for t5_idx in range(n_t5):
-            is_fake = t5_isFake[t5_idx]
-            is_dup = bool(t5_isDup[t5_idx])
-            track_pt = t5_pt[t5_idx]
-            track_eta = t5_eta[t5_idx]
-
-            # Apply same pT cut as transformer
-            if track_pt <= 0.8 or track_pt >= 100:
-                continue
-
-            pt_bin = np.digitize(track_pt, pt_bins) - 1
-            eta_bin = np.digitize(track_eta, eta_bins) - 1
-
-            if 0 <= pt_bin < n_bins_pt:
-                hist_fake_den_pt[pt_bin] += 1
-                if is_fake:
-                    hist_fake_num_pt[pt_bin] += 1
-                hist_dup_den_pt[pt_bin] += 1
-                if is_dup:
-                    hist_dup_num_pt[pt_bin] += 1
-
-            if 0 <= eta_bin < n_bins_eta:
-                hist_fake_den_eta[eta_bin] += 1
-                if is_fake:
-                    hist_fake_num_eta[eta_bin] += 1
-                hist_dup_den_eta[eta_bin] += 1
-                if is_dup:
-                    hist_dup_num_eta[eta_bin] += 1
-
-    def safe_divide(num, den):
-        return np.divide(num, den, out=np.zeros_like(num, dtype=float), where=den > 0)
-
-    def clopper_pearson_error(k, N):
-        valid = N > 0
-        k = np.asarray(k)
-        N = np.asarray(N)
-        _k = np.where(valid, k, 0)
-        _N = np.where(valid, N, 1)
-        eff = np.where(valid, _k / _N, 0)
-        low, high = proportion_confint(_k, _N, method="beta")
-        low = np.where(valid, low, 0)
-        high = np.where(valid, high, 0)
-        err_low = eff - low
-        err_high = high - eff
-        return [err_low, err_high]
-
-    eff_pt = safe_divide(hist_eff_num_pt, hist_eff_den_pt)
-    eff_eta = safe_divide(hist_eff_num_eta, hist_eff_den_eta)
-    fake_pt = safe_divide(hist_fake_num_pt, hist_fake_den_pt)
-    fake_eta = safe_divide(hist_fake_num_eta, hist_fake_den_eta)
-    dup_pt = safe_divide(hist_dup_num_pt, hist_dup_den_pt)
-    dup_eta = safe_divide(hist_dup_num_eta, hist_dup_den_eta)
-
-    eff_err_pt = clopper_pearson_error(hist_eff_num_pt, hist_eff_den_pt)
-    eff_err_eta = clopper_pearson_error(hist_eff_num_eta, hist_eff_den_eta)
-    fake_err_pt = clopper_pearson_error(hist_fake_num_pt, hist_fake_den_pt)
-    fake_err_eta = clopper_pearson_error(hist_fake_num_eta, hist_fake_den_eta)
-    dup_err_pt = clopper_pearson_error(hist_dup_num_pt, hist_dup_den_pt)
-    dup_err_eta = clopper_pearson_error(hist_dup_num_eta, hist_dup_den_eta)
-
-    return {
-        'efficiency_pt': eff_pt,
-        'efficiency_eta': eff_eta,
-        'fake_rate_pt': fake_pt,
-        'fake_rate_eta': fake_eta,
-        'duplicate_rate_pt': dup_pt,
-        'duplicate_rate_eta': dup_eta,
-        'efficiency_err_pt': eff_err_pt,
-        'efficiency_err_eta': eff_err_eta,
-        'fake_rate_err_pt': fake_err_pt,
-        'fake_rate_err_eta': fake_err_eta,
-        'duplicate_rate_err_pt': dup_err_pt,
-        'duplicate_rate_err_eta': dup_err_eta,
-    }
-
-
-def calculate_t5_metrics_cluster_def(t5_data, pt_bins, eta_bins, eta_cut=None, purity_threshold=0.75, max_t3_pt=2000):
-    """T5 efficiency and duplicate rate using the same definitions as the OC clusters
-    (see calculate_tracking_metrics): each T5 is treated as a cluster of its 2 T3s.
-
-    - A T5 matches a sim if >= purity_threshold of its 8 MD entries belong to the
-      majority (matched) sim.
-    - Denominator: selected sims that have at least one truth-matched T3 (same as the
-      graph's sim_index), with the eta acceptance applied for the pT plots.
-    - Efficiency: sim matched by >= 1 T5. Duplicate rate: sim matched by > 1 T5.
+def load_lst_objects(events, prefix):
     """
-    n_bins_pt = len(pt_bins) - 1
-    n_bins_eta = len(eta_bins) - 1
+    LST objects (prefix 't5' or 'tc') and sim tracks of the given (LSTNtuple path, entry) events, in order:
+    one dict of NumPy arrays per event, with pt, eta, pMatched and simIdx of the objects and sim_features
+    (same columns as the graphs' sim_features). pMatched is LST's hit-based match fraction and simIdx its
+    best sim track (set only if pMatched > 0.75).
+    """
+    obj_branches = [f"{prefix}_{v}" for v in ("pt", "eta", "pMatched", "simIdx")]
+    sim_branches = ["sim_pt", "sim_eta", "sim_phi", "sim_q", "sim_vx", "sim_vy", "sim_vz", "sim_vtxperp"]
+    by_file = defaultdict(list)
+    for i, (path, entry) in enumerate(events):
+        by_file[path].append((entry, i))
+    out = [None] * len(events)
+    for path, entries in by_file.items():
+        with uproot.open(path) as f:
+            tree = f["tree"]
+            for entry, i in entries:
+                a = tree.arrays(obj_branches + sim_branches, entry_start=entry, entry_stop=entry + 1)
+                ev = {v: np.asarray(a[f"{prefix}_{v}"][0]) for v in ("pt", "eta", "pMatched", "simIdx")}
+                ev["sim_features"] = np.stack([np.asarray(a[b][0], dtype=np.float64) for b in sim_branches], axis=1)
+                out[i] = ev
+    return out
 
-    eff_num_pt = np.zeros(n_bins_pt)
-    eff_den_pt = np.zeros(n_bins_pt)
-    eff_num_eta = np.zeros(n_bins_eta)
-    eff_den_eta = np.zeros(n_bins_eta)
-    dup_num_pt = np.zeros(n_bins_pt)
-    dup_num_eta = np.zeros(n_bins_eta)
 
-    for evt in range(len(t5_data['sim_pt'])):
-        sim_pt = np.asarray(t5_data['sim_pt'][evt])
-        sim_eta = np.asarray(t5_data['sim_eta'][evt])
-        sim_q = np.asarray(t5_data['sim_q'][evt])
-        sim_vx = np.asarray(t5_data['sim_vx'][evt])
-        sim_vy = np.asarray(t5_data['sim_vy'][evt])
-        sim_vz = np.asarray(t5_data['sim_vz'][evt])
-        t3_simIdx = np.asarray(t5_data['t3_simIdx'][evt])
-        t3_pt = np.asarray(t5_data['t3_pt'][evt])
-        maj = np.asarray(t5_data['t5_majSim'][evt], dtype=np.int64)
-        pur = np.asarray(t5_data['t5_mdPurity'][evt])
-        n_sim = len(sim_pt)
+def lst_metric_counts(event, pt_bins, eta_bins, purity_threshold=0.75, eta_cut=None):
+    """
+    Histograms for LST objects of one event with the same definitions as calculate_tracking_metrics:
+    an object is matched to its best sim track if pMatched > purity_threshold; efficiency and duplicate
+    rate are over all selected sim tracks, fake rate over objects with 0.8 < pT < 100 GeV.
+    """
+    sim = event["sim_features"]
+    n_sim = len(sim)
+    matched = (event["simIdx"] >= 0) & (event["pMatched"] > purity_threshold)
+    sims = event["simIdx"][matched]
+    n_matched = np.bincount(sims[sims < n_sim], minlength=n_sim)
+    sel = select_sims(sim)
+    pt_max = pt_bins[-1]
+    sim_pts, sim_etas = np.clip(sim[sel, 0], None, pt_max), sim[sel, 1]
+    reco, dup = n_matched[sel] > 0, n_matched[sel] > 1
+    acc = (sim_etas >= eta_cut[0]) & (sim_etas <= eta_cut[1]) if eta_cut is not None else np.ones(len(sim_etas), bool)
 
-        # Sims that appear as the truth label of at least one T3
-        truth = np.unique(t3_simIdx[(t3_simIdx >= 0) & (t3_pt < max_t3_pt)]).astype(np.int64)
-        truth = truth[truth < n_sim]
-
-        sel = (
-            (sim_q[truth] != 0)
-            & (sim_pt[truth] > 0.8)
-            & (np.abs(sim_eta[truth]) < 2.4)
-            & (np.abs(sim_vz[truth]) < 30)
-            & (np.sqrt(sim_vx[truth]**2 + sim_vy[truth]**2) < 2.5)
-        )
-        truth = truth[sel]
-
-        good = (maj >= 0) & (maj < n_sim) & (pur >= purity_threshold)
-        n_matched = np.bincount(maj[good], minlength=n_sim)
-        reco = n_matched[truth] > 0
-        dup = n_matched[truth] > 1
-
-        pts = np.clip(sim_pt[truth], None, pt_bins[-1])
-        etas = sim_eta[truth]
-        if eta_cut is not None:
-            acc = (etas >= eta_cut[0]) & (etas <= eta_cut[1])
-        else:
-            acc = np.ones(len(etas), dtype=bool)
-
-        eff_den_pt += np.histogram(pts[acc], bins=pt_bins)[0]
-        eff_num_pt += np.histogram(pts[acc & reco], bins=pt_bins)[0]
-        dup_num_pt += np.histogram(pts[acc & dup], bins=pt_bins)[0]
-        eff_den_eta += np.histogram(etas, bins=eta_bins)[0]
-        eff_num_eta += np.histogram(etas[reco], bins=eta_bins)[0]
-        dup_num_eta += np.histogram(etas[dup], bins=eta_bins)[0]
-
-    def safe_divide(num, den):
-        return np.divide(num, den, out=np.zeros_like(num, dtype=float), where=den > 0)
-
+    in_pt = (event["pt"] > 0.8) & (event["pt"] < 100)
+    obj_pts, obj_etas = np.clip(event["pt"][in_pt], None, pt_max), event["eta"][in_pt]
+    fake = ~matched[in_pt]
+    h = lambda values, bins: np.histogram(values, bins=bins)[0]
     return {
-        'efficiency_pt': safe_divide(eff_num_pt, eff_den_pt),
-        'efficiency_eta': safe_divide(eff_num_eta, eff_den_eta),
-        'duplicate_rate_pt': safe_divide(dup_num_pt, eff_den_pt),
-        'duplicate_rate_eta': safe_divide(dup_num_eta, eff_den_eta),
-        'efficiency_err_pt': clopper_pearson_error(eff_num_pt, eff_den_pt),
-        'efficiency_err_eta': clopper_pearson_error(eff_num_eta, eff_den_eta),
-        'duplicate_rate_err_pt': clopper_pearson_error(dup_num_pt, eff_den_pt),
-        'duplicate_rate_err_eta': clopper_pearson_error(dup_num_eta, eff_den_eta),
+        "eff_num_pt": h(sim_pts[acc & reco], pt_bins), "eff_den_pt": h(sim_pts[acc], pt_bins),
+        "eff_num_eta": h(sim_etas[reco], eta_bins), "eff_den_eta": h(sim_etas, eta_bins),
+        "dup_num_pt": h(sim_pts[acc & dup], pt_bins), "dup_num_eta": h(sim_etas[dup], eta_bins),
+        "fake_num_pt": h(obj_pts[fake], pt_bins), "fake_den_pt": h(obj_pts, pt_bins),
+        "fake_num_eta": h(obj_etas[fake], eta_bins), "fake_den_eta": h(obj_etas, eta_bins),
     }
 
 
-def clopper_pearson_error(k, N):
-    k = np.asarray(k)
-    N = np.asarray(N)
+def calculate_lst_metrics(lst_events, pt_bins, eta_bins, purity_threshold=0.75, eta_cut=None):
+    """Efficiency, fake rate and duplicate rate (with errors) of LST objects, summed over events (see lst_metric_counts)."""
+    totals = defaultdict(float)
+    for event in lst_events:
+        for key, value in lst_metric_counts(event, pt_bins, eta_bins, purity_threshold, eta_cut).items():
+            totals[key] = totals[key] + value
+    out = {}
+    for var in ("pt", "eta"):
+        for name, num, den in (("efficiency", "eff_num", "eff_den"), ("duplicate_rate", "dup_num", "eff_den"),
+                               ("fake_rate", "fake_num", "fake_den")):
+            k, n = totals[f"{num}_{var}"], totals[f"{den}_{var}"]
+            out[f"{name}_{var}"] = safe_divide(k, n)
+            out[f"{name}_err_{var}"] = clopper_pearson_error(k, n)
+    out["totals"] = dict(totals)
+    return out
+
+
+def safe_divide(num, den):
+    num = np.asarray(num, dtype=float)
+    return np.divide(num, den, out=np.zeros_like(num), where=np.asarray(den) > 0)
+
+
+def clopper_pearson_error(k, N, cl=0.95):
+    """Asymmetric Clopper-Pearson errors [low, high] of k / N (zero where N = 0)."""
+    k = np.asarray(k, dtype=float)
+    N = np.asarray(N, dtype=float)
     valid = N > 0
-    _k = np.where(valid, k, 0)
     _N = np.where(valid, N, 1)
-    eff = np.where(valid, _k / _N, 0)
-    low, high = proportion_confint(_k, _N, method="beta")
+    eff = np.where(valid, k / _N, 0)
+    alpha = 1 - cl
+    with np.errstate(invalid="ignore"):
+        low = np.where(k > 0, beta_dist.ppf(alpha / 2, k, _N - k + 1), 0.0)
+        high = np.where(k < _N, beta_dist.ppf(1 - alpha / 2, k + 1, _N - k), 1.0)
     low = np.where(valid, low, 0)
     high = np.where(valid, high, 0)
     return [eff - low, high - eff]
+
+
+def resolve_checkpoint(output):
+    """(checkpoint path, run dir) from --output: a checkpoint file, or a run dir (final_model.ckpt, else the last checkpoint)."""
+    if output.endswith(".ckpt") or output.endswith(".pt"):
+        return output, str(pathlib.Path(output).parent.parent if pathlib.Path(output).parent.name == "checkpoints"
+                           else pathlib.Path(output).parent)
+    ckpt = os.path.join(output, "final_model.ckpt")
+    if not os.path.exists(ckpt):
+        ckpt = sorted(glob(os.path.join(output, "checkpoints", "*.ckpt")))[-1]
+    return ckpt, output
+
+
+def find_normalization(hparams, run_dir):
+    """The normalization the model was trained with: checkpoint hparams, else <run dir>/normalization.json, else None (legacy)."""
+    if hparams.get("normalization"):
+        print("Using the feature normalization from the checkpoint hparams")
+        return hparams["normalization"]
+    path = os.path.join(run_dir, "normalization.json")
+    if os.path.exists(path):
+        print(f"Loading feature normalization from {path}")
+        return load_normalization(path)
+    print("No normalization in the checkpoint or run dir: using the legacy hardcoded normalization and neighbor search")
+    return None
+
+
+def build_model(hparams, config, input_dim):
+    """TransformerOCModel with the checkpoint's hparams, falling back to the config for older checkpoints."""
+    from model import TransformerOCModel
+    if "input_dim" in hparams and hparams["input_dim"] != input_dim:
+        raise ValueError(f"Checkpoint was trained with {hparams['input_dim']} features, the dataset has {input_dim}")
+    sources = {
+        "hidden_dim": config.get("hidden_dim", config.get("d_model", 128)),
+        "num_layers": config["num_layers"],
+        "num_heads": config["nhead"],
+        "latent_dim": config["latent_dim"],
+        "dropout": config.get("dropout", 0.1),
+        "dr_threshold": config.get("dr_threshold", 0.2),
+        "max_neighbors": config.get("max_neighbors", 64),
+        "normalize_embeddings": config.get("normalize_embeddings", True),
+    }
+    kwargs = {}
+    for key, from_config in sources.items():
+        if key in hparams:
+            kwargs[key] = hparams[key]
+        else:
+            print(f"  {key} not in checkpoint hparams, using the config's: {from_config}")
+            kwargs[key] = from_config
+    print(f"Model: {kwargs}")
+    return TransformerOCModel(input_dim=input_dim, **kwargs)
 
 
 def plot_efficiency_fake_rate(pt_bins, eta_bins, metrics_pt, metrics_eta, output_path, epsilon):
@@ -476,8 +264,8 @@ def plot_purity_duplicate(pt_bins, eta_bins, metrics_pt, metrics_eta, output_pat
 
 
 def plot_t5_comparison(pt_bins, eta_bins, model_metrics_pt, model_metrics_eta, t5_metrics, output_path, epsilon,
-                       metrics=('efficiency', 'fake_rate', 'duplicate_rate'), prefix='comparison'):
-    """Plot comparison of transformer and T5 efficiency, fake rate, and duplicate rate.
+                       metrics=('efficiency', 'fake_rate', 'duplicate_rate'), prefix='comparison', lst_label='LST T5s'):
+    """Plot comparison of transformer and LST (T5 or track candidate) efficiency, fake rate, and duplicate rate.
     Only the metrics listed in `metrics` are plotted; files are saved as {prefix}_{metric}_{var}_eps_*.png."""
     pt_centers = (pt_bins[:-1] + pt_bins[1:]) / 2
     eta_centers = (eta_bins[:-1] + eta_bins[1:]) / 2
@@ -507,7 +295,7 @@ def plot_t5_comparison(pt_bins, eta_bins, model_metrics_pt, model_metrics_eta, t
         fig, ax = plt.subplots(figsize=(12, 8))
 
         ax.errorbar(centers, m_y, yerr=m_err, fmt='o', color='blue', label='Transformer OC', capsize=3, markersize=5)
-        ax.errorbar(centers, t_y, yerr=t_err, fmt='s', color='red', label='LST T5s', capsize=3, markersize=5)
+        ax.errorbar(centers, t_y, yerr=t_err, fmt='s', color='red', label=lst_label, capsize=3, markersize=5)
 
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
@@ -527,119 +315,87 @@ def plot_t5_comparison(pt_bins, eta_bins, model_metrics_pt, model_metrics_eta, t
 def main():
     argparser = ArgumentParser()
     argparser.add_argument('--config', type=str, default='./config.yaml', help='Path to the config file (YAML)')
-    argparser.add_argument('--output', type=str, help='Path to the trained model file')
-    argparser.add_argument('--plot-output', type=str, help='Path to the plot output folder')
+    argparser.add_argument('--output', type=str, required=True, help='Run dir (output/lightning_logs/version_N) or checkpoint file')
+    argparser.add_argument('--plot-output', type=str, default=None, help='Plot output folder (default: the run dir)')
+    argparser.add_argument('--split', choices=['train', 'val', 'test'], default='test', help='Dataset split to evaluate (config <split>_data_dir)')
+    argparser.add_argument('--patch', action='store_true',
+                           help="Evaluate on the config's eta/phi patches (as validation: random centers fixed per event) "
+                                "instead of whole events; only sim tracks inside the patch count for the efficiency")
     argparser.add_argument('--epsilon', type=float, default=None, help='DBSCAN epsilon parameter (overrides config)')
     argparser.add_argument('--n-events', type=int, default=-1, help='Number of events to process (-1 for all)')
-    argparser.add_argument('--t5', action='store_true', help='Include T5 comparison plots')
-    argparser.add_argument('--t5-file', type=str, default="/home/users/jachisma/CMSSW_15_1_0_pre2/src/RecoTracker/LSTCore/standalone/output_pu200_all/*.root", help='Path or wildcard to ROOT file(s) with T5 data')
+    argparser.add_argument('--device', type=str, default='cuda:0' if torch.cuda.is_available() else 'cpu', help='Torch device for inference')
+    argparser.add_argument('--t5', action='store_true', help='Compare with LST T5s of the same events')
+    argparser.add_argument('--tc', action='store_true', help='Compare with LST track candidates of the same events')
+    argparser.add_argument('--lstntuple-dir', type=str, default=None,
+                           help=f"Directory of the LSTNtuples the graphs were made from (default: config lstntuple_dir, else {DEFAULT_LSTNTUPLE_DIR})")
     args = argparser.parse_args()
 
     config = load_config(args.config)
 
+    ckpt_path, run_dir = resolve_checkpoint(args.output)
+    plot_output = args.plot_output or run_dir
+    os.makedirs(plot_output, exist_ok=True)
+    print(f"Loading model from: {ckpt_path}")
+    checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    hparams = dict(checkpoint.get('hyper_parameters', {}))
+    normalization = find_normalization(hparams, run_dir)
+    raw_eta_phi = normalization is not None
+
+    mask_kwargs = {}
+    if args.patch:
+        if args.t5 or args.tc:
+            raise ValueError("--patch evaluates part of each event: it can't be compared with LST's whole-event T5s/TCs")
+        mask_kwargs = dict(
+            eta_mask_half_width=config.get('eta_mask_half_width'),
+            phi_mask_half_width=config.get('phi_mask_half_width'),
+            eta_mask_center=config.get('eta_mask_center', 0.0),
+            phi_mask_center=config.get('phi_mask_center', 0.0),
+            center_seed=config.get('val_mask_seed', config['seed']),
+        )
+        print(f"Evaluating on eta/phi patches: {mask_kwargs}")
+
     subset = args.n_events if args.n_events > 0 else None
-    dataset = PCDataset(
-        config['val_data_dir'],
-        subset=subset,
-    )
+    data_dir = config[f'{args.split}_data_dir']
+    dataset = PCDataset(data_dir, subset=subset, normalization=normalization, **mask_kwargs)
+    # Without a normalization the dataset uses the legacy one; un-normalizing for the metrics needs it too
+    normalization = dataset.normalization
     data_loader = DataLoader(dataset, shuffle=False, drop_last=False, num_workers=2)
+    print(f"Loaded {len(dataset)} events from {data_dir}")
 
-    print(f"Loaded dataset with {len(dataset)} graphs")
-
-    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(args.device)
     use_fp16 = device.type == 'cuda'  # Only use FP16 on CUDA
     print(f"Using device: {device}, FP16: {use_fp16}")
 
-    num_node_features = dataset[0].num_node_features
-
-    if config.get('model_type', 'transformer') == 'transformer':
-        from model import TransformerOCModel
-        model = TransformerOCModel(
-            input_dim=num_node_features,
-            hidden_dim=config.get('hidden_dim', config.get('d_model', 128)),
-            num_layers=config['num_layers'],
-            num_heads=config['nhead'],
-            latent_dim=config['latent_dim'],
-            dropout=config.get('dropout', 0.1),
-            dr_threshold=config.get('dr_threshold', 0.2),
-            attention_chunk_size=config.get('attention_chunk_size', 1024)
-        )
-
-    model.to(device)
-
-    if ".pt" in args.output or ".ckpt" in args.output:
-        output = args.output
-    else:
-        output = args.output + '/final_model.ckpt'
-
-    args.output = args.output if not args.output.endswith('.ckpt') else str(pathlib.Path(args.output).parent)
-
-    if not os.path.exists(output):
-        output = sorted(glob(os.path.join(args.output, 'checkpoints', '*.ckpt')))[-1]
-
-    print(f"Loading model from: {output}")
-
-    checkpoint = torch.load(output, weights_only=False)
-
-    if 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
-    else:
-        state_dict = checkpoint
-
+    model = build_model(hparams, config, input_dim=dataset[0].num_node_features)
+    state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
     if any(key.startswith('model.') for key in state_dict.keys()):
-        state_dict = {key.replace('model.', '', 1): value for key, value in state_dict.items()}
-
+        state_dict = {key.replace('model.', '', 1): value for key, value in state_dict.items() if key.startswith('model.')}
     model.load_state_dict(state_dict)
-
+    model.to(device)
     model.eval()
+    del checkpoint
 
     min_samples = config.get('dbscan_min_samples', 2)
     purity_threshold = config.get('purity_threshold', 0.75)
     beta_threshold = config.get('beta_threshold', None)
-
-    pt_bins = np.linspace(
-        config.get('pt_bins_start', 0.5),
-        config.get('pt_bins_end', 2.0),
-        config.get('pt_bins_count', 50)
-    )
-    eta_bins = np.linspace(
-        config.get('eta_bins_start', -4),
-        config.get('eta_bins_end', 4),
-        config.get('eta_bins_count', 50)
-    )
-
-    print(f"PT bins: {len(pt_bins)-1} bins from {pt_bins[0]:.2f} to {pt_bins[-1]:.2f} GeV")
-    print(f"Eta bins: {len(eta_bins)-1} bins from {eta_bins[0]:.2f} to {eta_bins[-1]:.2f}")
-
-    hist_eff_num_pt = np.zeros(len(pt_bins) - 1)
-    hist_eff_den_pt = np.zeros(len(pt_bins) - 1)
-    hist_eff_num_eta = np.zeros(len(eta_bins) - 1)
-    hist_eff_den_eta = np.zeros(len(eta_bins) - 1)
-
-    hist_fake_num_pt = np.zeros(len(pt_bins) - 1)
-    hist_fake_den_pt = np.zeros(len(pt_bins) - 1)
-    hist_fake_num_eta = np.zeros(len(eta_bins) - 1)
-    hist_fake_den_eta = np.zeros(len(eta_bins) - 1)
-
-    hist_purity_sum_pt = np.zeros(len(pt_bins) - 1)
-    hist_purity_count_pt = np.zeros(len(pt_bins) - 1)
-    hist_purity_sum_eta = np.zeros(len(eta_bins) - 1)
-    hist_purity_count_eta = np.zeros(len(eta_bins) - 1)
-
-    hist_dup_num_pt = np.zeros(len(pt_bins) - 1)
-    hist_dup_num_eta = np.zeros(len(eta_bins) - 1)
-
-    all_cluster_sizes = []
-    all_cluster_data = []
-    all_cluster_layer_spans = []
-
-    print(f"Processing {len(data_loader)} events with epsilon = {args.epsilon if args.epsilon else config.get('dbscan_eps', 0.05)}")
-    if beta_threshold is not None:
-        print(f"Using beta threshold = {beta_threshold} (rejecting hits with beta < {beta_threshold})")
-
+    min_layers = config.get('min_layers', 4)
     epsilon = args.epsilon if args.epsilon is not None else config.get('dbscan_eps', 0.05)
     eta_cut = config.get('eta_cut', (-2.5, 2.5))
 
+    pt_bins = np.linspace(config.get('pt_bins_start', 0.5), config.get('pt_bins_end', 2.0), config.get('pt_bins_count', 50))
+    eta_bins = np.linspace(config.get('eta_bins_start', -4), config.get('eta_bins_end', 4), config.get('eta_bins_count', 50))
+    beta_bins = np.logspace(-6, 0, 61)
+
+    print(f"PT bins: {len(pt_bins)-1} bins from {pt_bins[0]:.2f} to {pt_bins[-1]:.2f} GeV")
+    print(f"Eta bins: {len(eta_bins)-1} bins from {eta_bins[0]:.2f} to {eta_bins[-1]:.2f}")
+    print(f"Processing {len(data_loader)} events with epsilon = {epsilon}")
+    if beta_threshold is not None:
+        print(f"Using beta threshold = {beta_threshold} (rejecting T3s with beta < {beta_threshold})")
+    print(f"Clusters with >= {min_layers} layers are matched to a sim track if > {purity_threshold} of their distinct hits are on it")
+
+    sums = defaultdict(float)
+    all_cluster_sizes, all_cluster_data, all_cluster_layer_spans, all_cluster_fracs = [], [], [], []
+    beta_frac_counts = None
     timings = []
 
     for i, data in enumerate(data_loader):
@@ -647,132 +403,71 @@ def main():
             print(f"Processing event {i+1}/{len(data_loader)}")
 
         start_time = time.time()
-        cluster, beta = run_inference_and_clustering(data, model, device, eps=epsilon, min_samples=min_samples, use_fp16=use_fp16, beta_threshold=beta_threshold)
-        end_time = time.time()
-        timings.append(end_time - start_time)
+        cluster, beta = run_inference_and_clustering(data, model, device, eps=epsilon, min_samples=min_samples, use_fp16=use_fp16,
+                                                     beta_threshold=beta_threshold, raw_eta_phi=raw_eta_phi)
+        timings.append(time.time() - start_time)
 
-        cluster_labels = cluster.labels_
-        metrics = calculate_tracking_metrics(data, cluster_labels, pt_bins, eta_bins, purity_threshold=purity_threshold, eta_cut=eta_cut, beta=beta)
-
-        hist_eff_num_pt += metrics['efficiency_numerator_pt']
-        hist_eff_den_pt += metrics['efficiency_denominator_pt']
-        hist_eff_num_eta += metrics['efficiency_numerator_eta']
-        hist_eff_den_eta += metrics['efficiency_denominator_eta']
-
-        hist_fake_num_pt += metrics['fake_rate_numerator_pt']
-        hist_fake_den_pt += metrics['total_tracks_pt']
-        hist_fake_num_eta += metrics['fake_rate_numerator_eta']
-        hist_fake_den_eta += metrics['total_tracks_eta']
-
-        hist_purity_sum_pt += metrics['purity_sum_pt']
-        hist_purity_count_pt += metrics['purity_count_pt']
-        hist_purity_sum_eta += metrics['purity_sum_eta']
-        hist_purity_count_eta += metrics['purity_count_eta']
-
-        hist_dup_num_pt += metrics['duplicate_rate_numerator_pt']
-        hist_dup_num_eta += metrics['duplicate_rate_numerator_eta']
-
+        sim_region = None
+        if args.patch:
+            sim_region = (data.eta_mask_center.item(), data.phi_mask_center.item(),
+                          mask_kwargs['eta_mask_half_width'], mask_kwargs['phi_mask_half_width'])
+        metrics = calculate_tracking_metrics(data, cluster.labels_, pt_bins, eta_bins, normalization,
+                                             purity_threshold=purity_threshold, eta_cut=eta_cut,
+                                             min_layers=min_layers, sim_region=sim_region)
+        for key, value in metrics.items():
+            if isinstance(value, np.ndarray):
+                sums[key] = sums[key] + value
         all_cluster_sizes.extend(metrics['cluster_sizes'])
         all_cluster_data.extend(metrics['cluster_data'])
         all_cluster_layer_spans.extend(metrics['cluster_layer_spans'])
+        all_cluster_fracs.extend(metrics['cluster_hit_fractions'])
+
+        counts = t3_beta_hit_fraction_hist(data, beta, beta_bins)
+        beta_frac_counts = counts if beta_frac_counts is None else beta_frac_counts + counts
 
     print(f"Average inference and clustering time per event: {np.mean(timings):.4f} seconds")
 
-    def clopper_pearson_error(k, N):
-        valid = N > 0
-        k = np.asarray(k)
-        N = np.asarray(N)
-        _k = np.where(valid, k, 0)
-        _N = np.where(valid, N, 1)
-        eff = np.where(valid, _k / _N, 0)
-        low, high = proportion_confint(_k, _N, method="beta")
-        low = np.where(valid, low, 0)
-        high = np.where(valid, high, 0)
-        err_low = eff - low
-        err_high = high - eff
-        return [err_low, err_high]
+    metrics_pt, metrics_eta = {}, {}
+    for var, out in (('pt', metrics_pt), ('eta', metrics_eta)):
+        eff_num, eff_den = sums[f'efficiency_numerator_{var}'], sums[f'efficiency_denominator_{var}']
+        fake_num, fake_den = sums[f'fake_rate_numerator_{var}'], sums[f'total_tracks_{var}']
+        dup_num = sums[f'duplicate_rate_numerator_{var}']
+        purity_sum, purity_count = sums[f'purity_sum_{var}'], sums[f'purity_count_{var}']
+        purity = safe_divide(purity_sum, purity_count)
+        purity_err = np.where(purity_count > 0, np.sqrt(purity * (1 - purity) / np.maximum(purity_count, 1)), 0)
+        out.update({
+            'efficiency': safe_divide(eff_num, eff_den),
+            'fake_rate': safe_divide(fake_num, fake_den),
+            'purity': purity,
+            'duplicate_rate': safe_divide(dup_num, eff_den),
+            'efficiency_err': clopper_pearson_error(eff_num, eff_den),
+            'fake_rate_err': clopper_pearson_error(fake_num, fake_den),
+            'purity_err': [purity_err, purity_err],
+            'duplicate_rate_err': clopper_pearson_error(dup_num, eff_den),
+        })
 
-    eff_pt = np.divide(hist_eff_num_pt, hist_eff_den_pt, out=np.zeros_like(hist_eff_num_pt), where=hist_eff_den_pt!=0)
-    eff_eta = np.divide(hist_eff_num_eta, hist_eff_den_eta, out=np.zeros_like(hist_eff_num_eta), where=hist_eff_den_eta!=0)
+    plot_efficiency_fake_rate(pt_bins, eta_bins, metrics_pt, metrics_eta, plot_output, epsilon)
+    plot_purity_duplicate(pt_bins, eta_bins, metrics_pt, metrics_eta, plot_output, epsilon)
+    plot_beta_vs_hit_fraction(beta_frac_counts, beta_bins, plot_output, epsilon)
+    if all_cluster_fracs:
+        plot_cluster_hit_fraction(all_cluster_fracs, purity_threshold, plot_output, epsilon)
 
-    fake_pt = np.divide(hist_fake_num_pt, hist_fake_den_pt, out=np.zeros_like(hist_fake_num_pt), where=hist_fake_den_pt!=0)
-    fake_eta = np.divide(hist_fake_num_eta, hist_fake_den_eta, out=np.zeros_like(hist_fake_num_eta), where=hist_fake_den_eta!=0)
-
-    purity_pt = np.divide(hist_purity_sum_pt, hist_purity_count_pt, out=np.zeros_like(hist_purity_sum_pt), where=hist_purity_count_pt!=0)
-    purity_eta = np.divide(hist_purity_sum_eta, hist_purity_count_eta, out=np.zeros_like(hist_purity_sum_eta), where=hist_purity_count_eta!=0)
-
-    dup_pt = np.divide(hist_dup_num_pt, hist_eff_den_pt, out=np.zeros_like(hist_dup_num_pt), where=hist_eff_den_pt!=0)
-    dup_eta = np.divide(hist_dup_num_eta, hist_eff_den_eta, out=np.zeros_like(hist_dup_num_eta), where=hist_eff_den_eta!=0)
-
-    eff_err_pt = clopper_pearson_error(hist_eff_num_pt, hist_eff_den_pt)
-    eff_err_eta = clopper_pearson_error(hist_eff_num_eta, hist_eff_den_eta)
-    fake_err_pt = clopper_pearson_error(hist_fake_num_pt, hist_fake_den_pt)
-    fake_err_eta = clopper_pearson_error(hist_fake_num_eta, hist_fake_den_eta)
-    dup_err_pt = clopper_pearson_error(hist_dup_num_pt, hist_eff_den_pt)
-    dup_err_eta = clopper_pearson_error(hist_dup_num_eta, hist_eff_den_eta)
-
-    purity_err_pt = np.sqrt(purity_pt * (1 - purity_pt) / hist_purity_count_pt)
-    purity_err_pt = np.where(hist_purity_count_pt > 0, purity_err_pt, 0)
-    # Reformat symmetric error as asymmetric to match other errors in the plots
-    purity_err_pt = [purity_err_pt, purity_err_pt]
-
-    purity_err_eta = np.sqrt(purity_eta * (1 - purity_eta) / hist_purity_count_eta)
-    purity_err_eta = np.where(hist_purity_count_eta > 0, purity_err_eta, 0)
-    purity_err_eta = [purity_err_eta, purity_err_eta]
-
-    metrics_pt = {
-        'efficiency': eff_pt,
-        'fake_rate': fake_pt,
-        'purity': purity_pt,
-        'duplicate_rate': dup_pt,
-        'efficiency_err': eff_err_pt,
-        'fake_rate_err': fake_err_pt,
-        'purity_err': purity_err_pt,
-        'duplicate_rate_err': dup_err_pt
-    }
-
-    metrics_eta = {
-        'efficiency': eff_eta,
-        'fake_rate': fake_eta,
-        'purity': purity_eta,
-        'duplicate_rate': dup_eta,
-        'efficiency_err': eff_err_eta,
-        'fake_rate_err': fake_err_eta,
-        'purity_err': purity_err_eta,
-        'duplicate_rate_err': dup_err_eta
-    }
-
-    # Plot efficiency and fake rate
-    plot_efficiency_fake_rate(pt_bins, eta_bins, metrics_pt, metrics_eta, args.plot_output, epsilon)
-
-    # Plot purity and duplicate rate
-    plot_purity_duplicate(pt_bins, eta_bins, metrics_pt, metrics_eta, args.plot_output, epsilon)
-
-    # Load and plot T5 comparison if requested
-    if args.t5:
-        n_model_events = len(data_loader)
-        print(f"\nLoading T5 data from: {args.t5_file} (max {n_model_events} events)")
-        t5_data = load_t5_data(args.t5_file, max_events=n_model_events)
-
-        # Limit T5 events to match model events
-        if len(t5_data['t5_pt']) > n_model_events:
-            print(f"Limiting T5 data to {n_model_events} events")
-            for key in t5_data:
-                t5_data[key] = t5_data[key][:n_model_events]
-
-        print("\nCalculating T5 metrics...")
-        t5_metrics = calculate_t5_metrics(t5_data, pt_bins, eta_bins, eta_cut=eta_cut, purity_threshold=purity_threshold)
-
-        # Plot comparison
-        plot_t5_comparison(pt_bins, eta_bins, metrics_pt, metrics_eta, t5_metrics, args.plot_output, epsilon)
-
-        # Same comparison, but with T5 efficiency/duplicate rate defined like the clusters
-        t5_metrics_cl = calculate_t5_metrics_cluster_def(t5_data, pt_bins, eta_bins, eta_cut=eta_cut, purity_threshold=purity_threshold)
-        plot_t5_comparison(pt_bins, eta_bins, metrics_pt, metrics_eta, t5_metrics_cl, args.plot_output, epsilon,
-                           metrics=('efficiency', 'duplicate_rate'), prefix='comparison_clusterdef')
+    lst_metrics = {}
+    lst_prefixes = [p for p, wanted in (('t5', args.t5), ('tc', args.tc)) if wanted]
+    if lst_prefixes:
+        lstntuple_dir = args.lstntuple_dir or config.get('lstntuple_dir', DEFAULT_LSTNTUPLE_DIR)
+        events = lstntuple_events(dataset.graph_files[:len(dataset)], lstntuple_dir)
+        if purity_threshold < 0.75:
+            print("Warning: LST sets simIdx only for pMatched > 0.75, so LST objects use 0.75 for lower purity thresholds")
+        for prefix in lst_prefixes:
+            print(f"\nLoading {LST_LABELS[prefix]} of the same {len(events)} events from {lstntuple_dir}")
+            lst_events = load_lst_objects(events, prefix)
+            lst_metrics[prefix] = calculate_lst_metrics(lst_events, pt_bins, eta_bins, purity_threshold=purity_threshold, eta_cut=eta_cut)
+            plot_t5_comparison(pt_bins, eta_bins, metrics_pt, metrics_eta, lst_metrics[prefix], plot_output, epsilon,
+                               prefix=f'comparison_{prefix}', lst_label=LST_LABELS[prefix])
 
     if all_cluster_sizes:
-        plot_cluster_size_histogram(all_cluster_sizes, pt_bins, eta_bins, args.plot_output, epsilon, cluster_data=all_cluster_data)
+        plot_cluster_size_histogram(all_cluster_sizes, pt_bins, eta_bins, plot_output, epsilon, cluster_data=all_cluster_data)
         print(f"\nCluster size statistics:")
         print(f"  Total clusters: {len(all_cluster_sizes)}")
         print(f"  Mean cluster size: {np.mean(all_cluster_sizes):.2f}")
@@ -780,36 +475,40 @@ def main():
         print(f"  Min/Max cluster size: {min(all_cluster_sizes)}/{max(all_cluster_sizes)}")
 
     if all_cluster_layer_spans:
-        plot_layer_span_histogram(all_cluster_layer_spans, args.plot_output, epsilon)
-        plot_layer_span_2d(all_cluster_data, all_cluster_layer_spans, pt_bins, eta_bins, args.plot_output, epsilon)
-        print(f"\nLayer span statistics:")
+        plot_layer_span_histogram(all_cluster_layer_spans, plot_output, epsilon)
+        plot_layer_span_2d(all_cluster_data, all_cluster_layer_spans, pt_bins, eta_bins, plot_output, epsilon)
+        print(f"\nLayer span statistics (clusters with >= {min_layers} layers):")
         print(f"  Mean layer span: {np.mean(all_cluster_layer_spans):.2f}")
         print(f"  Median layer span: {np.median(all_cluster_layer_spans):.0f}")
         print(f"  Min/Max layer span: {min(all_cluster_layer_spans)}/{max(all_cluster_layer_spans)}")
+
+    def ratio(num, den):
+        den = np.sum(sums[den]) if isinstance(den, str) else den
+        return np.sum(sums[num]) / den if den > 0 else float('nan')
 
     print("\n" + "="*60)
     print("PERFORMANCE SUMMARY")
     print("="*60)
     print(f"Epsilon: {epsilon}")
-    print(f"Purity Threshold: {purity_threshold}")
+    print(f"Purity Threshold: {purity_threshold} (LST-style hit matching)")
     if beta_threshold is not None:
         print(f"Beta Threshold: {beta_threshold}")
-    print(f"Events processed: {len(data_loader)}")
-    print(f"Output directory: {args.output}")
-    print("\nTransformer OC Performance (mean over non-zero bins):")
-    print(f"  Efficiency: {np.mean(eff_pt[eff_pt > 0]):.3f}")
-    print(f"  Fake Rate: {np.mean(fake_pt[fake_pt > 0]):.3f}")
-    print(f"  Purity: {np.mean(purity_pt[purity_pt > 0]):.3f}")
+    print(f"Events processed: {len(data_loader)} ({args.split}{', patches' if args.patch else ''})")
+    print(f"Model: {ckpt_path}")
+    print("\nTransformer OC (integrated over the pT bins):")
+    print(f"  Efficiency: {ratio('efficiency_numerator_pt', 'efficiency_denominator_pt'):.3f}")
+    print(f"  Fake Rate: {ratio('fake_rate_numerator_pt', 'total_tracks_pt'):.3f}")
+    print(f"  Duplicate Rate: {ratio('duplicate_rate_numerator_pt', 'efficiency_denominator_pt'):.3f}")
+    print(f"  Purity: {ratio('purity_sum_pt', 'purity_count_pt'):.3f}")
+    for prefix, m in lst_metrics.items():
+        t = m['totals']
+        print(f"\n{LST_LABELS[prefix]} (integrated over the pT bins):")
+        print(f"  Efficiency: {np.sum(t['eff_num_pt']) / max(np.sum(t['eff_den_pt']), 1):.3f}")
+        print(f"  Fake Rate: {np.sum(t['fake_num_pt']) / max(np.sum(t['fake_den_pt']), 1):.3f}")
+        print(f"  Duplicate Rate: {np.sum(t['dup_num_pt']) / max(np.sum(t['eff_den_pt']), 1):.3f}")
 
-    if args.t5:
-        print(f"\nT5 Performance (mean over non-zero bins):")
-        print(f"  Efficiency: {np.mean(t5_metrics['efficiency_pt'][t5_metrics['efficiency_pt'] > 0]):.3f}")
-        print(f"  Fake Rate: {np.mean(t5_metrics['fake_rate_pt'][t5_metrics['fake_rate_pt'] > 0]):.3f}")
-        print(f"\nT5 Performance, cluster definitions (mean over non-zero bins):")
-        print(f"  Efficiency: {np.mean(t5_metrics_cl['efficiency_pt'][t5_metrics_cl['efficiency_pt'] > 0]):.3f}")
-        print(f"  Duplicate Rate: {np.mean(t5_metrics_cl['duplicate_rate_pt'][t5_metrics_cl['duplicate_rate_pt'] > 0]):.3f}")
+    print(f"\nPlots saved to: {plot_output}/")
 
-    print(f"\nPlots saved to: {args.plot_output}/")
 
 if __name__ == "__main__":
     main()

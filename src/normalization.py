@@ -30,6 +30,18 @@ def log_transform(x: torch.Tensor, names: list[str], log_features: list[str]) ->
     return x
 
 
+def unnormalize(x: torch.Tensor, normalization: dict) -> torch.Tensor:
+    """Inverse of PCDataset's normalization: raw features from normalized x (log columns exponentiated back)."""
+    names = normalization["names"]
+    feature_min = torch.tensor(normalization["min"], dtype=x.dtype, device=x.device)
+    feature_max = torch.tensor(normalization["max"], dtype=x.dtype, device=x.device)
+    x = x * (feature_max - feature_min + 1e-8) + feature_min
+    for name in normalization["log"]:
+        col = names.index(name)
+        x[:, col] = torch.exp(x[:, col]) - LOG_EPSILON
+    return x
+
+
 def compute_normalization(
     files: list[str],
     names: list[str],

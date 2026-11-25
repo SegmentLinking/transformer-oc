@@ -1,7 +1,11 @@
+import os
 import sys
 
-sys.path.append("/home/users/aaarora/phys/tracking/transformers/oc")
-sys.path.append("/home/users/aaarora/phys/tracking/transformers/oc/training")
+# Flat imports from analysis/ and src/, wherever this module is imported from
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _path in (_HERE, os.path.join(_HERE, "..", "src")):
+    if _path not in sys.path:
+        sys.path.append(_path)
 
 import matplotlib.pyplot as plt
 import mplhep as hep
@@ -12,6 +16,11 @@ from sklearn.cluster import DBSCAN
 hep.style.use(hep.style.CMS)
 
 from profiler import InferenceProfiler, print_gpu_info, profile_memory
+from constants import N_T3_MDS
+from dataset import eta_phi_mask
+from hit_matching import match_clusters, select_sims
+from normalization import unnormalize
+from utils.hit_targets import hit_candidates, hit_targets
 
 
 def to_numpy(t):
@@ -31,7 +40,11 @@ def run_inference_and_clustering(
     beta_threshold=None,
     profiler=None,
     enable_profiling=False,
+    raw_eta_phi=False,
 ):
+    # raw_eta_phi: pass the dataset's raw eta/phi to the model's neighbor search, as training does
+    # since the normalization moved to normalization.json. False keeps the legacy neighbor search
+    # that older checkpoints were trained with.
     # Create profiler if requested and not provided
     if profiler is None and enable_profiling:
         profiler = InferenceProfiler(device=device if device != "cpu" else "cuda:0")
@@ -44,6 +57,7 @@ def run_inference_and_clustering(
     else:
         x = data.x.to(device)
         batch = data.batch.to(device)
+    coords = {"eta": data.eta.to(device), "phi": data.phi.to(device)} if raw_eta_phi else {}
 
     model.eval()
 
@@ -52,21 +66,21 @@ def run_inference_and_clustering(
         with profiler.profile_section("model_forward"):
             if use_fp16 and device != "cpu":
                 with torch.amp.autocast("cuda"):
-                    out = model(x, batch)
+                    out = model(x, batch, **coords)
                 X = out["H"].float()
                 beta = out["B"].float()
             else:
-                out = model(x, batch)
+                out = model(x, batch, **coords)
                 X = out["H"]
                 beta = out["B"]
     else:
         if use_fp16 and device != "cpu":
             with torch.amp.autocast("cuda"):
-                out = model(x, batch)
+                out = model(x, batch, **coords)
             X = out["H"].float()
             beta = out["B"].float()
         else:
-            out = model(x, batch)
+            out = model(x, batch, **coords)
             X = out["H"]
             beta = out["B"]
 
@@ -127,235 +141,149 @@ def calculate_tracking_metrics(
     cluster_labels,
     pt_bins,
     eta_bins,
+    normalization,
     purity_threshold=0.75,
     eta_cut=None,
-    beta=None,
-    beta_stats=True,
-    vtxperp_bins=None,
+    min_layers=4,
+    sim_region=None,
 ):
-    sim_features = data.sim_features
-    t3_truth_labels = to_numpy(data.sim_index).flatten()
-    t3_truth_labels[t3_truth_labels < 0] = -1
+    """
+    Efficiency, fake rate, duplicate rate and purity of the clusters of one event, with LST-style hit
+    matching (hit_matching.match_clusters): a cluster is matched to its best sim track if more than
+    purity_threshold of its distinct hits have that sim track. Clusters with fewer than min_layers
+    distinct hit layers are dropped.
 
-    x_features = to_numpy(data.x)
+    Efficiency and duplicate rate are over all selected sim tracks of the event (hit_matching.select_sims),
+    whether or not any T3 matches them. sim_region: None, or (eta_center, phi_center, eta_half_width,
+    phi_half_width) to only count sim tracks with (eta, phi) in that patch (evaluation on eta/phi patches).
 
-    md_layers = to_numpy(data.md_layer)
-    md_simIdx = to_numpy(data.md_simIdx)
+    normalization: the dataset's (PCDataset.normalization), to recover raw T3 pT, eta and MD positions.
+    Reco track pT/eta are those of the cluster's T3 with the innermost MD.
+    """
+    labels = np.asarray(cluster_labels)
+    names = normalization["names"]
+    x_raw = to_numpy(unnormalize(data.x.float(), normalization))
+    t3_pt = x_raw[:, names.index("t3_pt")]
+    t3_eta = x_raw[:, names.index("t3_eta")]
+    md_r = np.stack([np.hypot(x_raw[:, names.index(f"md{i}_anchor_x")], x_raw[:, names.index(f"md{i}_anchor_y")])
+                     for i in range(N_T3_MDS)], axis=1)
+    t3_r = md_r.min(axis=1)
 
-    if x_features.shape[1] == 26:
-        min_pt, max_pt = -1.02, 7.0
-        min_eta, max_eta = -2.62, 2.62
-    else:
-        min_pt, max_pt = -3.4627, 7.5964
-        min_eta, max_eta = -2.4507, 2.4535
+    m = match_clusters(labels, to_numpy(data.hit_idx), to_numpy(hit_candidates(data)), to_numpy(data.hit_layer))
 
-    real_track_pts = []
-    real_track_etas = []
-    real_track_purities = []
+    # innermost T3 of each cluster, in the order of m["label"] (sorted labels)
+    in_cluster = np.where(labels >= 0)[0]
+    order = in_cluster[np.lexsort((t3_r[in_cluster], labels[in_cluster]))]
+    inner = order[np.r_[True, labels[order][1:] != labels[order][:-1]]] if len(order) else order
+    reco_pt = t3_pt[inner].astype(float)
+    reco_eta = t3_eta[inner].astype(float)
 
-    fake_track_pts = []
-    fake_track_etas = []
+    keep = m["n_layers"] >= min_layers
+    matched = keep & (m["sim"] >= 0) & (m["frac"] > purity_threshold)
+    fake = keep & ~matched
+    in_pt = (reco_pt > 0.8) & (reco_pt < 100)
 
-    cluster_sizes = []
-    cluster_data = []
-    cluster_layer_spans = []
-
-    correctly_reconstructed_sim = set()
-    sim_to_pred_clusters = {}
-
-    unique_pred_labels = np.unique(cluster_labels[cluster_labels >= 0])
-
-    for pred_label in unique_pred_labels:
-        mask = cluster_labels == pred_label
-        cluster_indices = np.where(mask)[0]
-
-        # Always use MD simIdx for purity calculation
-        cluster_md_simIdx = md_simIdx[cluster_indices].flatten()
-        truth_in_cluster = cluster_md_simIdx
-        truth_no_fake = truth_in_cluster[truth_in_cluster >= 0]
-
-        cluster_size = int(np.sum(mask))
-        cluster_sizes.append(cluster_size)
-        segment_pts_norm = x_features[cluster_indices, 0]
-        segment_etas_norm = x_features[cluster_indices, 1]
-
-        segment_pts_log = segment_pts_norm * (max_pt - min_pt) + min_pt
-        segment_pts = np.exp(segment_pts_log) - 1e-6
-        segment_etas = segment_etas_norm * (max_eta - min_eta) + min_eta
-
-        t3_md0_x = x_features[cluster_indices, 13]
-        t3_md0_y = x_features[cluster_indices, 14]
-        t3_md1_x = x_features[cluster_indices, 22]
-        t3_md1_y = x_features[cluster_indices, 23]
-        t3_md2_x = x_features[cluster_indices, 31]
-        t3_md2_y = x_features[cluster_indices, 32]
-
-        t3_md0_r = np.sqrt(t3_md0_x**2 + t3_md0_y**2)
-        t3_md1_r = np.sqrt(t3_md1_x**2 + t3_md1_y**2)
-        t3_md2_r = np.sqrt(t3_md2_x**2 + t3_md2_y**2)
-
-        t3_lowest_r = np.minimum(np.minimum(t3_md0_r, t3_md1_r), t3_md2_r)
-        lowest_r_idx = np.argmin(t3_lowest_r)
-        reco_track_pt = float(segment_pts[lowest_r_idx])
-        reco_track_eta = float(segment_etas[lowest_r_idx])
-
-        # Always check layer span and filter out layer span == 3
-        cluster_md_layers = md_layers[cluster_indices]
-        all_layers = set(cluster_md_layers.flatten())
-        layer_span = len(all_layers)
-        if layer_span < 4:
-            continue
-
-        if reco_track_pt != -999.0 and reco_track_eta != -999.0:
-            cluster_data.append((reco_track_pt, reco_track_eta, cluster_size))
-
-        if len(truth_no_fake) == 0:
-            is_fake = True
-            purity = 0.0
-        else:
-            unique_labels, counts = np.unique(truth_no_fake, return_counts=True)
-            majority_label = int(unique_labels[np.argmax(counts)])
-            purity = np.sum(truth_in_cluster == majority_label) / len(truth_in_cluster)
-            is_fake = purity < purity_threshold
-
-            if not is_fake:
-                cluster_layer_spans.append(layer_span)
-                correctly_reconstructed_sim.add(majority_label)
-                sim_to_pred_clusters.setdefault(majority_label, []).append(pred_label)
-
-        if is_fake:
-            if reco_track_pt > 0.8 and reco_track_pt < 100:
-                fake_track_pts.append(reco_track_pt)
-                fake_track_etas.append(reco_track_eta)
-        else:
-            if reco_track_pt > 0.8 and reco_track_pt < 100:
-                real_track_pts.append(reco_track_pt)
-                real_track_etas.append(reco_track_eta)
-                real_track_purities.append(purity)
-
-    # For efficiency calculation, we use t3_truth_labels to match with sim_features
-    unique_truth_labels = np.unique(t3_truth_labels[t3_truth_labels >= 0])
-    valid_sim_mask = unique_truth_labels < len(sim_features)
-    valid_sim_labels = unique_truth_labels[valid_sim_mask].astype(int)
-
-    sim_pts = np.array([float(sim_features[i][0]) for i in valid_sim_labels])
-    sim_etas = np.array([float(sim_features[i][1]) for i in valid_sim_labels])
-    sim_q = np.array([float(sim_features[i][3]) for i in valid_sim_labels])
-    sim_vx = np.array([float(sim_features[i][4]) for i in valid_sim_labels])
-    sim_vy = np.array([float(sim_features[i][5]) for i in valid_sim_labels])
-    sim_vz = np.array([float(sim_features[i][6]) for i in valid_sim_labels])
-
-    selection_mask = (
-        (sim_q != 0)
-        & (sim_pts > 0.8)
-        & (np.abs(sim_etas) < 2.4)
-        & (np.abs(sim_vz) < 30)
-        & (np.sqrt(sim_vx**2 + sim_vy**2) < 2.5)
-    )
-
-    valid_sim_labels = valid_sim_labels[selection_mask]
-    sim_pts = sim_pts[selection_mask]
-    sim_etas = sim_etas[selection_mask]
-
-    sim_reconstructed = np.array(
-        [i in correctly_reconstructed_sim for i in valid_sim_labels]
-    )
-    sim_duplicated = np.array(
-        [len(sim_to_pred_clusters.get(i, [])) > 1 for i in valid_sim_labels]
-    )
-
-    if eta_cut is not None:
-        eta_min, eta_max = eta_cut
-        in_acceptance = (sim_etas >= eta_min) & (sim_etas <= eta_max)
-    else:
-        in_acceptance = np.ones(len(sim_etas), dtype=bool)
-
-    # Implement overflow bin for pT
     pt_max = pt_bins[-1]
-    sim_pts = np.clip(sim_pts, None, pt_max)
+    real_pts, real_etas, real_purities = np.clip(reco_pt[matched & in_pt], None, pt_max), reco_eta[matched & in_pt], m["frac"][matched & in_pt]
+    fake_pts, fake_etas = np.clip(reco_pt[fake & in_pt], None, pt_max), reco_eta[fake & in_pt]
 
-    # Efficiency: reconstructed / all truth particles
-    hist_eff_num_pt, _ = np.histogram(
-        sim_pts[in_acceptance][sim_reconstructed[in_acceptance]], bins=pt_bins
-    )
-    hist_eff_den_pt, _ = np.histogram(sim_pts[in_acceptance], bins=pt_bins)
-    hist_eff_num_eta, _ = np.histogram(sim_etas[sim_reconstructed], bins=eta_bins)
-    hist_eff_den_eta, _ = np.histogram(sim_etas, bins=eta_bins)
-
-    hist_dup_num_pt, _ = np.histogram(
-        sim_pts[in_acceptance][sim_duplicated[in_acceptance]], bins=pt_bins
-    )
-    hist_dup_num_eta, _ = np.histogram(sim_etas[sim_duplicated], bins=eta_bins)
-
-    real_track_pts = (
-        np.array(real_track_pts) if len(real_track_pts) > 0 else np.array([])
-    )
-    real_track_etas = (
-        np.array(real_track_etas) if len(real_track_etas) > 0 else np.array([])
-    )
-    fake_track_pts = (
-        np.array(fake_track_pts) if len(fake_track_pts) > 0 else np.array([])
-    )
-    fake_track_etas = (
-        np.array(fake_track_etas) if len(fake_track_etas) > 0 else np.array([])
-    )
-
-    if len(real_track_pts) > 0:
-        real_track_pts = np.clip(real_track_pts, None, pt_max)
-    if len(fake_track_pts) > 0:
-        fake_track_pts = np.clip(fake_track_pts, None, pt_max)
-
-    # Bin by reconstructed kinematics (now properly inverted from preprocessing)
-    hist_real_pt, _ = np.histogram(real_track_pts, bins=pt_bins)
-    hist_real_eta, _ = np.histogram(real_track_etas, bins=eta_bins)
-    hist_fake_pt, _ = np.histogram(fake_track_pts, bins=pt_bins)
-    hist_fake_eta, _ = np.histogram(fake_track_etas, bins=eta_bins)
-
-    hist_tracks_pt = hist_real_pt + hist_fake_pt
-    hist_tracks_eta = hist_real_eta + hist_fake_eta
-
-    # Purity: compute weighted averages per bin using np.histogram with weights
-    real_track_pts = (
-        np.array(real_track_pts) if len(real_track_pts) > 0 else np.array([])
-    )
-    real_track_purities = (
-        np.array(real_track_purities) if len(real_track_purities) > 0 else np.array([])
-    )
-
-    if len(real_track_pts) > 0:
-        hist_purity_sum_pt, _ = np.histogram(
-            real_track_pts, bins=pt_bins, weights=real_track_purities
-        )
-        hist_purity_count_pt, _ = np.histogram(real_track_pts, bins=pt_bins)
-        hist_purity_sum_eta, _ = np.histogram(
-            real_track_etas, bins=eta_bins, weights=real_track_purities
-        )
-        hist_purity_count_eta, _ = np.histogram(real_track_etas, bins=eta_bins)
+    # Denominator: all selected sim tracks of the (signal) event
+    sim_features = to_numpy(data.sim_features)
+    n_sim = len(sim_features)
+    sim_sel = select_sims(sim_features)
+    if sim_region is not None:
+        eta_c, phi_c, eta_hw, phi_hw = sim_region
+        sim_sel &= to_numpy(eta_phi_mask(torch.from_numpy(sim_features[:, 1]), torch.from_numpy(sim_features[:, 2]),
+                                         eta_c, phi_c, eta_hw, phi_hw))
+    matched_sims = m["sim"][matched]
+    n_matched = np.bincount(matched_sims[matched_sims < n_sim], minlength=n_sim)
+    sim_pts = np.clip(sim_features[sim_sel, 0], None, pt_max)
+    sim_etas = sim_features[sim_sel, 1]
+    sim_reco = n_matched[sim_sel] > 0
+    sim_dup = n_matched[sim_sel] > 1
+    if eta_cut is not None:
+        in_acc = (sim_etas >= eta_cut[0]) & (sim_etas <= eta_cut[1])
     else:
-        hist_purity_sum_pt = np.zeros(len(pt_bins) - 1)
-        hist_purity_count_pt = np.zeros(len(pt_bins) - 1)
-        hist_purity_sum_eta = np.zeros(len(eta_bins) - 1)
-        hist_purity_count_eta = np.zeros(len(eta_bins) - 1)
+        in_acc = np.ones(len(sim_etas), dtype=bool)
+
+    hist = lambda values, bins, weights=None: np.histogram(values, bins=bins, weights=weights)[0]
+    hist_real_pt, hist_real_eta = hist(real_pts, pt_bins), hist(real_etas, eta_bins)
+    hist_fake_pt, hist_fake_eta = hist(fake_pts, pt_bins), hist(fake_etas, eta_bins)
 
     return {
-        "efficiency_numerator_pt": hist_eff_num_pt,
-        "efficiency_numerator_eta": hist_eff_num_eta,
-        "efficiency_denominator_pt": hist_eff_den_pt,
-        "efficiency_denominator_eta": hist_eff_den_eta,
+        "efficiency_numerator_pt": hist(sim_pts[in_acc & sim_reco], pt_bins),
+        "efficiency_numerator_eta": hist(sim_etas[sim_reco], eta_bins),
+        "efficiency_denominator_pt": hist(sim_pts[in_acc], pt_bins),
+        "efficiency_denominator_eta": hist(sim_etas, eta_bins),
         "fake_rate_numerator_pt": hist_fake_pt,
         "fake_rate_numerator_eta": hist_fake_eta,
-        "purity_sum_pt": hist_purity_sum_pt,
-        "purity_sum_eta": hist_purity_sum_eta,
-        "total_tracks_pt": hist_tracks_pt,
-        "total_tracks_eta": hist_tracks_eta,
-        "purity_count_pt": hist_purity_count_pt,
-        "purity_count_eta": hist_purity_count_eta,
-        "duplicate_rate_numerator_pt": hist_dup_num_pt,
-        "duplicate_rate_numerator_eta": hist_dup_num_eta,
-        "cluster_sizes": cluster_sizes,
-        "cluster_data": cluster_data,
-        "cluster_layer_spans": cluster_layer_spans,
+        "total_tracks_pt": hist_real_pt + hist_fake_pt,
+        "total_tracks_eta": hist_real_eta + hist_fake_eta,
+        "purity_sum_pt": hist(real_pts, pt_bins, real_purities),
+        "purity_sum_eta": hist(real_etas, eta_bins, real_purities),
+        "purity_count_pt": hist_real_pt,
+        "purity_count_eta": hist_real_eta,
+        "duplicate_rate_numerator_pt": hist(sim_pts[in_acc & sim_dup], pt_bins),
+        "duplicate_rate_numerator_eta": hist(sim_etas[sim_dup], eta_bins),
+        "cluster_sizes": m["n_t3"].tolist(),
+        # per cluster with >= min_layers layers: (reco pT, reco eta, size), layer span, hit fraction
+        "cluster_data": list(zip(reco_pt[keep], reco_eta[keep], m["n_t3"][keep])),
+        "cluster_layer_spans": m["n_layers"][keep].tolist(),
+        "cluster_hit_fractions": m["frac"][keep].tolist(),
     }
+
+
+def t3_beta_hit_fraction_hist(data, beta, beta_bins):
+    """
+    Counts (H + 1, len(beta_bins) - 1) of the T3s' beta, per T3 hit fraction k / H (row k): the fraction
+    of the T3's hits on its best sim track, as used by the hit-fraction loss (hit_fraction_loss).
+    """
+    cand = hit_candidates(data)
+    n_hits = cand.shape[1]
+    _, frac = hit_targets(cand, 1)
+    k = np.rint(to_numpy(frac) * n_hits).astype(int)
+    beta = np.clip(np.asarray(beta).flatten(), beta_bins[0], beta_bins[-1])
+    counts = np.zeros((n_hits + 1, len(beta_bins) - 1))
+    for i in range(n_hits + 1):
+        counts[i] = np.histogram(beta[k == i], bins=beta_bins)[0]
+    return counts
+
+
+def plot_beta_vs_hit_fraction(counts, beta_bins, output_path, epsilon):
+    """Normalized beta distributions of the T3s, one per T3 hit fraction (from t3_beta_hit_fraction_hist)."""
+    n_hits = counts.shape[0] - 1
+    fig, ax = plt.subplots(figsize=(12, 8))
+    cmap = plt.get_cmap("viridis")
+    for k in range(n_hits + 1):
+        total = counts[k].sum()
+        if total == 0:
+            continue
+        ax.stairs(counts[k] / total, beta_bins, color=cmap(k / n_hits), linewidth=2,
+                  label=f"{k}/{n_hits} hits matched ({int(total)} T3s)")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel(r"$\beta$")
+    ax.set_ylabel("Fraction of T3s")
+    ax.legend(fontsize=14, loc="upper left")
+    hep.cms.label("Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
+    plt.tight_layout()
+    plt.savefig(f"{output_path}/beta_vs_hit_fraction_eps_{epsilon:.3f}.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def plot_cluster_hit_fraction(fractions, purity_threshold, output_path, epsilon):
+    """Distribution of the clusters' best-sim hit fraction, with the matching threshold."""
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.hist(fractions, bins=np.linspace(0, 1, 41), edgecolor="black", alpha=0.7, color="steelblue", label="Transformer OC")
+    ax.axvline(purity_threshold, color="red", linestyle="--", label=f"Matching threshold ({purity_threshold})")
+    ax.set_xlabel("Fraction of cluster hits on best sim track")
+    ax.set_ylabel("Number of clusters")
+    ax.set_yscale("log")
+    ax.legend(fontsize=18, loc="upper left")
+    hep.cms.label("Preliminary", data=False, rlabel=r"Phase-2 (14 TeV)", ax=ax)
+    plt.tight_layout()
+    plt.savefig(f"{output_path}/cluster_hit_fraction_eps_{epsilon:.3f}.png", dpi=300, bbox_inches="tight")
+    plt.close()
 
 
 def plot_performance_histograms(
@@ -669,14 +597,4 @@ def plot_layer_span_2d(
         dpi=300,
         bbox_inches="tight",
     )
-    plt.savefig(
-        f"{output_path}/layer_span_2d_eps_{epsilon:.3f}.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
     plt.close()
-    plt.savefig(
-        f"{output_path}/layer_span_2d_eps_{epsilon:.3f}.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
