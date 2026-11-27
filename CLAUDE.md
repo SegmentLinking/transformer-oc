@@ -2,6 +2,8 @@
 
 ML track reconstruction for CMS Phase-2 (HL-LHC, PU200). A sparse transformer is trained with an **object condensation (OC)** loss to group LST (Line Segment Tracking) **T3** objects, one point cloud per event, into tracks. Upstream: [SegmentLinking/transformer-oc](https://github.com/SegmentLinking/transformer-oc), originally by Aashay Arora (see `notes/tuna.md` for links to the CHEP26 talk and DP note).
 
+Provide balanced accurate answers that critically evaluate proposed ideas. Do not merely confirm what you think the user wants to hear nor be overly critical. When mathematical calculations help get the point across, work them out in detail so I can follow them easily. Communicate clearly and concisely. Do not be overly verbose. Do not use acronyms without defining them unless they are extremely well known. When genuinely uncertain, say so.
+
 ## Conventions
 
 Here are miscellaneous conventions about how to write code for this project. The conventions should be followed within reason. When in doubt, please ask.
@@ -32,12 +34,10 @@ When writing new code, follow this direction even if the existing code doesn't y
 
 ## Layout
 
-- `data/`: preprocessing (ROOT LSTNtuple to `.pt`). `t3_processing.py` is the main script, `ls_processing.py` is the LS variant, and column names live in `constants.py`. Everything under `data/` except `*.py`, `*.sh` and `*.sub` is gitignored.
 - `src/`: training. `main.py` (Lightning entrypoint), `model.py` (`TransformerOCModel` and `TransformerLightningModule`), `dataset.py` (`PCDataset`), `utils/object_condensation.py` (OC loss, uses `fastgraphcompute`), `utils/hept_utils.py` (HEPT LSH attention, currently unused).
 - `analysis/`: evaluation. `main.py` runs inference, clusters, and plots efficiency, fake rate and duplicates; `measures.py` holds the metrics. The other scripts are one-off studies.
 - `config_*.yaml`: one config drives preprocessing paths, training and analysis. `config_pu200_dev.yaml` is a small local smoke-test config.
 - `misc/nrp/`: Kubernetes YAMLs and Dockerfiles for the NRP cluster (namespace `cern-cms-gpu-tracking`).
-- `notes/tuna.md`: running log of data provenance, environment and issues. Read it for background.
 
 ## Environment
 
