@@ -29,16 +29,11 @@ Open (soon, not now): `MDTransformerNet.predict` and `MDTransformerModule.forwar
 
 Open (worth studying): same-layer, same-sim MD pairs are many, and their |Δη| is not small. Barrel diagonals have 4.7k–19.5k pairs (most in layer 6) in 20 training events. Their q0.9 |Δη| is 0.11–0.36, except 0.03 in layer 1, while their q0.9 |Δφ| is only 0.01–0.2. A prompt track should cross a layer once, or twice in module overlaps with tiny Δη. Candidates: loopers re-crossing at another z, secondaries, tilted inner-barrel modules. From `LayerPairWindows.from_events` (window_quantile 0.9, first 20 training events).
 
-Todo: make the choice of training patch centres configurable: a random MD (now), or drawn at random from a uniform distribution in η (|η| ≤ 2.8) and φ. Random MDs put more patches in dense regions. The inference patch grid is not random (evenly spaced centres), but it gives every η/φ region one patch, so on average uniformly drawn centres would cover the detector the way inference does.
+Vertex regression (2026-11-23, `md_transformer.py`): targets asinh(sim_vz / 5 cm) and log1p(sim_vtxperp / 1 cm),
+MSE weighted by `sim_vz_weight` and `sim_vtxperp_weight` (default 0.0), `[md_quality]` keys `vz_res_iqr` and
+`vtxperp_res_iqr` in cm; not in `cluster_space`.
 
-Todo (2026-11-20, once the harness and the first-pass MDTransformer are stable): rename SimpleMDNet to MDMLP, which is more descriptive and shorter. This covers the class, `simple_mdnet.py`, `--trackcands simple_mdnet` and the saved `simple_mdnet.pt`.
-
-Todo (2026-11-22): test how well the network regresses each MD's sim track production vertex, `sim_vtxperp` and `sim_vz`. One MD alone should resolve them poorly (the 2S strips have little z information), but attention across the patch may do better than expected. Measure the resolution (IQR, as in `[md_quality]`) before deciding whether vertex outputs help the decoder.
-Implemented 2026-11-23 in `md_transformer.py`: targets asinh(sim_vz / 5 cm) and log1p(sim_vtxperp / 1 cm), MSE
-weighted by `sim_vz_weight` and `sim_vtxperp_weight` (default 0.0), `[md_quality]` keys `vz_res_iqr` and
-`vtxperp_res_iqr` in cm; not in `cluster_space`. Still to do: a training run with the weights > 0.
-
-Todo: speed up `MDTransformerNet.predict`, about 2 s of the harness's 2.2 s per event on the V100 (run_2026_11_19_224953, first validation file). About 1.3 s of it is building the 84 grid patches on the CPU, each scanning all ~50k MDs of the event; the forward pass is 0.45–0.8 s. Ideas: sort MDs into grid cells once, build patches on the GPU, a larger `patches_per_batch`.
+Todo items live in `TODO.md`.
 
 ## How it works: SimpleMDNet
 
